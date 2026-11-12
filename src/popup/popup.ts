@@ -238,12 +238,12 @@ async function init() {
     if (s) renderStatus(s);
   });
   $('clearMemory').addEventListener('click', async () => {
-    if (!tabUrl) {
-      setStatus('Could not clear page memory: active tab URL unavailable.', true);
+    if (tabId < 0 || !tabUrl) {
+      setStatus('Could not clear page memory: active tab is unavailable.', true);
       return;
     }
     try {
-      await browser.runtime.sendMessage({ type: 'clearPageMemory', pageUrl: tabUrl });
+      await browser.runtime.sendMessage({ type: 'clearPageMemory', pageUrl: tabUrl, tabId });
       setStatus('Memory cleared for this page.');
     } catch (e) {
       setStatus(`Could not clear page memory: ${String(e)}`, true);

@@ -132,7 +132,13 @@ try {
   await sw.evaluate(async () => {
     const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
     await chrome.storage.session.set({ [`tab:${tab.id}`]: { textDiagnostics: true } });
+    await chrome.storage.local.set({
+      'llm-page-translator:memory:v1:page:expired-e2e': Date.now() - 31 * 24 * 60 * 60 * 1000,
+      'llm-page-translator:memory:v1:entry:expired-e2e:frame': ['stale'],
+    });
   });
+  await page.reload();
+  await page.waitForTimeout(500);
   const tabMsg = (msg) =>
     sw.evaluate(async (m) => {
       const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1/*' });
@@ -212,6 +218,15 @@ try {
   check((await errBadge.locator('.msg').innerText()).includes('HTTP 500'), 'error badge reports HTTP error');
   await errBadge.getByRole('button', { name: 'Details' }).click();
   check((await errBadge.locator('pre').innerText()).includes('mock model exploded'), 'details show response body');
+  const failedChunkId = backgroundDiagnostics
+    .find((line) => line.includes('[LLM Page Translator] backend translation failed'))
+    ?.match(/chunkId:\s*(\d+)/)?.[1];
+  check(
+    !!failedChunkId && !backgroundDiagnostics.some((line) =>
+      line.includes('[LLM Page Translator] translation memory stored') &&
+      line.match(/chunkId:\s*(\d+)/)?.[1] === failedChunkId),
+    'provider failures do not produce memory-store diagnostics',
+  );
   const failedChunkRequests = requests.filter((r) => r.messages[1].content.includes('FAILME')).length;
 
   const longBadge = page.locator('#long .xt-badge-host');
@@ -239,6 +254,18 @@ try {
   await errBadge.getByRole('button', { name: 'Retry' }).click();
   await page.waitForTimeout(1500);
   check((await page.locator('#fail').innerText()).includes('IT:Please FAILME now.'), 'retry succeeds');
+  const memoryDiagnostics = () => backgroundDiagnostics.filter((line) => line.includes('[LLM Page Translator] translation memory'));
+  check(memoryDiagnostics().some((line) => line.includes('translation memory miss')), 'enabled diagnostics log memory misses');
+  check(memoryDiagnostics().some((line) => line.includes('translation memory stored')), 'enabled diagnostics log successful memory stores');
+  check(memoryDiagnostics().some((line) => line.includes('translation memory expired')), 'enabled diagnostics log expired memory cleanup');
+  check(
+    memoryDiagnostics().every((line) =>
+      !line.includes('http') &&
+      !line.includes('The first sentence is here.') &&
+      !line.includes('IT:The first sentence is here.'),
+    ),
+    'memory diagnostics do not expose page URLs, source text, or translations',
+  );
   check(
     requests.filter((r) => r.messages[1].content.includes('FAILME')).length === failedChunkRequests + 1,
     'failed chunks are retried at the provider instead of being served from memory',
@@ -257,6 +284,7 @@ try {
   await tabMsg({ type: 'start' });
   await page.waitForTimeout(1000);
   check(requests.length === cachedRequestCount, 'retranslating the same page reuses successful chunk memory');
+  check(memoryDiagnostics().some((line) => line.includes('translation memory hit')), 'enabled diagnostics log memory hits');
   await tabMsg({ type: 'restore' });
 
   // Oversized "send as one chunk" path
@@ -266,6 +294,13 @@ try {
   await page.waitForTimeout(1500);
   check((await page.locator('#long').innerText()).startsWith('IT:This is a deliberately long phrase'), 'send-as-one-chunk translates whole phrase');
 
+  await sw.evaluate(async () => {
+    await chrome.storage.local.set({
+      'llm-page-translator:memory:v1:page:expired-disabled-e2e': Date.now() - 31 * 24 * 60 * 60 * 1000,
+      'llm-page-translator:memory:v1:entry:expired-disabled-e2e:frame': ['stale'],
+    });
+  });
+  const frameDiagnosticStart = backgroundDiagnostics.length;
   const framePage = await ctx.newPage();
   await framePage.goto(`http://127.0.0.1:${PORT}/iframe-test`);
   const frameTabMessage = (msg) =>
@@ -305,6 +340,10 @@ try {
   check(!frameStart.error, `frame start reaches injectable documents ${frameStart.error ?? ''}`);
   check(frameStart.rejected > 0, 'unmatched frame message rejection does not block other frames');
   await framePage.waitForTimeout(3500);
+  check(
+    !backgroundDiagnostics.slice(frameDiagnosticStart).some((line) => line.includes('[LLM Page Translator] translation memory')),
+    'disabled diagnostics do not log iframe memory activity',
+  );
   const frameTexts = [
     'Top-document boundary phrase.',
     'Cross-origin boundary phrase.',
@@ -366,11 +405,42 @@ try {
       check(hasClearMemoryButton, 'popup exposes a page memory clear button');
       check((await pg.locator('#textDiagnostics').count()) === 1, 'popup exposes per-tab text diagnostics toggle');
       if (hasClearMemoryButton) {
+        const popupTabId = await sw.evaluate(async () =>
+          (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id,
+        );
+        await sw.evaluate(async (tabId) => {
+          await chrome.storage.session.set({ [`tab:${tabId}`]: { textDiagnostics: true } });
+        }, popupTabId);
+        const clearDiagnosticStart = backgroundDiagnostics.length;
         await clearMemoryButton.click();
         await pg.waitForFunction(() => document.querySelector('#status')?.textContent === 'Memory cleared for this page.');
+        const clearEvent = backgroundDiagnostics
+          .slice(clearDiagnosticStart)
+          .find((line) => line.includes('[LLM Page Translator] translation memory cleared'));
+        check(
+          !!clearEvent && clearEvent.includes('removedEntries'),
+          'enabled diagnostics log page memory clears',
+        );
+        check(
+          !!clearEvent &&
+            !clearEvent.includes('http') &&
+            !clearEvent.includes('The first sentence is here.') &&
+            !clearEvent.includes('IT:'),
+          'page-clear diagnostics omit URLs, source text, and translations',
+        );
       }
       const beforePageClear = requests.length;
-      await pg.evaluate((pageUrl) => chrome.runtime.sendMessage({ type: 'clearPageMemory', pageUrl }), framePage.url());
+      const frameTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0]?.id, framePage.url());
+      check(typeof frameTabId === 'number', 'iframe tab ID is available for scoped memory diagnostics');
+      const disabledClearCount = backgroundDiagnostics.filter((line) => line.includes('[LLM Page Translator] translation memory cleared')).length;
+      await pg.evaluate(
+        ({ pageUrl, tabId }) => chrome.runtime.sendMessage({ type: 'clearPageMemory', pageUrl, tabId }),
+        { pageUrl: framePage.url(), tabId: frameTabId },
+      );
+      check(
+        backgroundDiagnostics.filter((line) => line.includes('[LLM Page Translator] translation memory cleared')).length === disabledClearCount,
+        'disabled diagnostics do not log iframe memory clears',
+      );
       await frameTabMessage({ type: 'start' });
       await framePage.waitForTimeout(3500);
       check(requests.length > beforePageClear, 'clearing a page removes its top-document and iframe memories');

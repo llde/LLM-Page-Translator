@@ -88,7 +88,7 @@ export interface PageStatus {
 export type RuntimeRequest =
   | { type: 'getConfig' }
   | { type: 'testConnection'; settings?: GlobalSettings }
-  | { type: 'clearPageMemory'; pageUrl: string }
+  | { type: 'clearPageMemory'; pageUrl: string; tabId: number }
   | { type: 'listModels'; backend?: Pick<GlobalSettings, 'provider' | 'baseUrl' | 'apiKey'> };
 
 export interface ModelListResult {

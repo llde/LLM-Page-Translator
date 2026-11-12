@@ -86,7 +86,10 @@ describe('translation memory', () => {
     await setTranslationMemory(context(recentPage), settings, segments, translations);
 
     vi.setSystemTime(new Date('2026-02-02T00:00:00Z'));
-    await visitTranslationMemory(recentPage, 30);
+    await expect(visitTranslationMemory(recentPage, 30)).resolves.toEqual({
+      expiredPages: 1,
+      expiredEntries: 2,
+    });
     await expect(getTranslationMemory(context(oldPage), settings, segments)).resolves.toBeUndefined();
     await expect(
       getTranslationMemory(context(oldPage, 2, 'https://example.com/old-frame'), settings, segments),
@@ -97,11 +100,12 @@ describe('translation memory', () => {
   it('clears all frame memories for one page without clearing another page', async () => {
     const page = 'https://example.com/article';
     const otherPage = 'https://example.com/another';
+    await visitTranslationMemory(page, 30);
     await setTranslationMemory(context(page), settings, segments, translations);
     await setTranslationMemory(context(page, 3, 'https://example.com/embed'), settings, segments, translations);
     await setTranslationMemory(context(otherPage), settings, segments, translations);
 
-    await clearPageTranslationMemory(page);
+    await expect(clearPageTranslationMemory(page)).resolves.toEqual({ removedEntries: 2 });
 
     await expect(getTranslationMemory(context(page), settings, segments)).resolves.toBeUndefined();
     await expect(

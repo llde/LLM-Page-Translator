@@ -86,7 +86,10 @@ export async function setTranslationMemory(
   await browser.storage.local.set({ [key]: values });
 }
 
-export async function visitTranslationMemory(pageUrl: string, retentionDays: number): Promise<void> {
+export async function visitTranslationMemory(
+  pageUrl: string,
+  retentionDays: number,
+): Promise<{ expiredPages: number; expiredEntries: number }> {
   if (!Number.isInteger(retentionDays) || retentionDays < 1) {
     throw new RangeError('Translation memory retention must be a positive whole number of days');
   }
@@ -102,12 +105,17 @@ export async function visitTranslationMemory(pageUrl: string, retentionDays: num
   if (expiredKeys.length) await browser.storage.local.remove(expiredKeys);
 
   await browser.storage.local.set({ [`${PAGE_PREFIX}${currentPageHash}`]: Date.now() });
+  return {
+    expiredPages: expiredPageHashes.length,
+    expiredEntries: expiredKeys.filter((key) => key.startsWith(ENTRY_PREFIX)).length,
+  };
 }
 
-export async function clearPageTranslationMemory(pageUrl: string): Promise<void> {
+export async function clearPageTranslationMemory(pageUrl: string): Promise<{ removedEntries: number }> {
   const page = await pageHash(pageUrl);
   const prefixes = [`${PAGE_PREFIX}${page}`, `${ENTRY_PREFIX}${page}:`];
   const stored = await browser.storage.local.get(null);
   const keys = Object.keys(stored).filter((key) => prefixes.some((prefix) => key.startsWith(prefix)));
   if (keys.length) await browser.storage.local.remove(keys);
+  return { removedEntries: keys.filter((key) => key.startsWith(ENTRY_PREFIX)).length };
 }

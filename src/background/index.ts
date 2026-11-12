@@ -170,9 +170,17 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
             console.info('[LLM Page Translator] translation memory hit', {
               chunkId: msg.chunkId,
               segmentIds: msg.segments.map((segment) => segment.id),
+              frameId,
             });
           }
         } else {
+          if (memoryContext && cfg.textDiagnostics) {
+            console.info('[LLM Page Translator] translation memory miss', {
+              chunkId: msg.chunkId,
+              segmentCount: msg.segments.length,
+              frameId,
+            });
+          }
           if (cfg.textDiagnostics) {
             console.info('[LLM Page Translator] backend request received', {
               chunkId: msg.chunkId,
@@ -183,6 +191,13 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
           translations = await translate(cfg, msg.segments, ctl.signal);
           if (!ctl.signal.aborted && memoryContext) {
             await setTranslationMemory(memoryContext, cfg, msg.segments, translations);
+            if (cfg.textDiagnostics) {
+              console.info('[LLM Page Translator] translation memory stored', {
+                chunkId: msg.chunkId,
+                segmentCount: msg.segments.length,
+                frameId,
+              });
+            }
           }
         }
         if (!ctl.signal.aborted) {
@@ -217,7 +232,12 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
 
 async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentConfig> {
   const cfg = await getSettings(sender.tab?.id);
-  if (sender.tab?.url) await visitTranslationMemory(sender.tab.url, cfg.memoryRetentionDays);
+  if (sender.tab?.url) {
+    const cleanup = await visitTranslationMemory(sender.tab.url, cfg.memoryRetentionDays);
+    if (cfg.textDiagnostics && (cleanup.expiredPages > 0 || cleanup.expiredEntries > 0)) {
+      console.info('[LLM Page Translator] translation memory expired', cleanup);
+    }
+  }
   const host = hostnameOf(sender.tab?.url ?? sender.url);
   return {
     maxChunkSize: cfg.maxChunkSize,
@@ -243,10 +263,19 @@ browser.runtime.onMessage.addListener((raw: unknown, sender: Runtime.MessageSend
   const msg = raw as RuntimeRequest;
   if (msg?.type === 'getConfig') return getContentConfig(sender);
   if (msg?.type === 'testConnection') return testConnection(msg.settings);
-  if (msg?.type === 'clearPageMemory') return clearPageTranslationMemory(msg.pageUrl);
+  if (msg?.type === 'clearPageMemory') return clearPageMemory(msg.pageUrl, msg.tabId);
   if (msg?.type === 'listModels') return listModels(msg.backend);
   return undefined;
 });
+
+async function clearPageMemory(pageUrl: string, tabId: number) {
+  const cfg = await getSettings(tabId, pageUrl);
+  const result = await clearPageTranslationMemory(pageUrl);
+  if (cfg.textDiagnostics) {
+    console.info('[LLM Page Translator] translation memory cleared', result);
+  }
+  return result;
+}
 
 const LIST_MODELS_TIMEOUT_MS = 10_000;
 
