@@ -14,6 +14,13 @@ import {
 } from '../shared/types';
 import { buildMessages, parseResponse, ParseError } from './prompt';
 import { BudgetError, buildModelsRequest, buildRequest, checkBudget, extractContent, parseModels, type ModelsConfig } from './providers';
+import {
+  clearPageTranslationMemory,
+  getTranslationMemory,
+  setTranslationMemory,
+  visitTranslationMemory,
+  type TranslationMemoryContext,
+} from '../shared/translationMemory';
 import type { Runtime } from 'webextension-polyfill';
 
 class TranslateError extends Error {
@@ -150,16 +157,36 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
       try {
         const cfg = await getSettings(tabId, port.sender?.tab?.url);
         diagnosticsEnabled = cfg.textDiagnostics;
-        if (cfg.textDiagnostics) {
-          console.info('[LLM Page Translator] backend request received', {
-            chunkId: msg.chunkId,
-            segmentIds: msg.segments.map((segment) => segment.id),
-            segmentCount: msg.segments.length,
-          });
-        }
-        const translations = await translate(cfg, msg.segments, ctl.signal);
-        if (!ctl.signal.aborted) {
+        const pageUrl = port.sender?.tab?.url;
+        const frameId = port.sender?.frameId;
+        const frameUrl = port.sender?.url;
+        const memoryContext: TranslationMemoryContext | undefined =
+          pageUrl && frameId !== undefined && frameUrl ? { pageUrl, frameId, frameUrl } : undefined;
+        const cached = memoryContext ? await getTranslationMemory(memoryContext, cfg, msg.segments) : undefined;
+        let translations: Record<number, string>;
+        if (cached) {
+          translations = cached;
           if (cfg.textDiagnostics) {
+            console.info('[LLM Page Translator] translation memory hit', {
+              chunkId: msg.chunkId,
+              segmentIds: msg.segments.map((segment) => segment.id),
+            });
+          }
+        } else {
+          if (cfg.textDiagnostics) {
+            console.info('[LLM Page Translator] backend request received', {
+              chunkId: msg.chunkId,
+              segmentIds: msg.segments.map((segment) => segment.id),
+              segmentCount: msg.segments.length,
+            });
+          }
+          translations = await translate(cfg, msg.segments, ctl.signal);
+          if (!ctl.signal.aborted && memoryContext) {
+            await setTranslationMemory(memoryContext, cfg, msg.segments, translations);
+          }
+        }
+        if (!ctl.signal.aborted) {
+          if (cfg.textDiagnostics && !cached) {
             console.info('[LLM Page Translator] backend translation completed', {
               chunkId: msg.chunkId,
               translationIds: Object.keys(translations),
@@ -190,6 +217,7 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
 
 async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentConfig> {
   const cfg = await getSettings(sender.tab?.id);
+  if (sender.tab?.url) await visitTranslationMemory(sender.tab.url, cfg.memoryRetentionDays);
   const host = hostnameOf(sender.tab?.url ?? sender.url);
   return {
     maxChunkSize: cfg.maxChunkSize,
@@ -215,6 +243,7 @@ browser.runtime.onMessage.addListener((raw: unknown, sender: Runtime.MessageSend
   const msg = raw as RuntimeRequest;
   if (msg?.type === 'getConfig') return getContentConfig(sender);
   if (msg?.type === 'testConnection') return testConnection(msg.settings);
+  if (msg?.type === 'clearPageMemory') return clearPageTranslationMemory(msg.pageUrl);
   if (msg?.type === 'listModels') return listModels(msg.backend);
   return undefined;
 });

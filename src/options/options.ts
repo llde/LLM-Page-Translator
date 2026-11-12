@@ -9,7 +9,7 @@ const msg = document.getElementById('msg') as HTMLSpanElement;
 const details = document.getElementById('details') as HTMLPreElement;
 const urlHint = document.getElementById('urlHint') as HTMLElement;
 
-const NUMBER_KEYS = ['contextWindow', 'maxTokens', 'temperature', 'requestTimeoutSec', 'maxChunkSize', 'concurrency'] as const;
+const NUMBER_KEYS = ['contextWindow', 'maxTokens', 'temperature', 'requestTimeoutSec', 'maxChunkSize', 'concurrency', 'memoryRetentionDays'] as const;
 const TEXT_KEYS = ['provider', 'baseUrl', 'apiKey', 'systemPrompt', 'defaultTabPrompt'] as const;
 
 const URL_HINTS: Record<Provider, string> = {

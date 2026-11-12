@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   targetLanguage: 'English',
   autoTranslateSites: [],
   translateDynamic: true,
+  memoryRetentionDays: 30,
 };
 
 const GLOBAL_KEY = 'settings';
@@ -33,6 +34,9 @@ const LEGACY_DEFAULT_MODEL = 'llama3.1';
 export function normalizeGlobal(stored: Partial<GlobalSettings> | undefined): GlobalSettings {
   const s = { ...DEFAULT_SETTINGS, ...(stored ?? {}) };
   if (s.model === LEGACY_DEFAULT_MODEL) s.model = '';
+  if (!Number.isInteger(s.memoryRetentionDays) || s.memoryRetentionDays < 1) {
+    s.memoryRetentionDays = DEFAULT_SETTINGS.memoryRetentionDays;
+  }
   return s;
 }
 

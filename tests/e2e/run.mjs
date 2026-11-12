@@ -212,6 +212,7 @@ try {
   check((await errBadge.locator('.msg').innerText()).includes('HTTP 500'), 'error badge reports HTTP error');
   await errBadge.getByRole('button', { name: 'Details' }).click();
   check((await errBadge.locator('pre').innerText()).includes('mock model exploded'), 'details show response body');
+  const failedChunkRequests = requests.filter((r) => r.messages[1].content.includes('FAILME')).length;
 
   const longBadge = page.locator('#long .xt-badge-host');
   check((await longBadge.count()) === 1, 'oversized badge shown');
@@ -238,6 +239,10 @@ try {
   await errBadge.getByRole('button', { name: 'Retry' }).click();
   await page.waitForTimeout(1500);
   check((await page.locator('#fail').innerText()).includes('IT:Please FAILME now.'), 'retry succeeds');
+  check(
+    requests.filter((r) => r.messages[1].content.includes('FAILME')).length === failedChunkRequests + 1,
+    'failed chunks are retried at the provider instead of being served from memory',
+  );
 
   const st = await tabMsg({ type: 'status' });
   check(st.errors === 0 && st.oversized === 0 && st.busy === 0 && st.done === st.total, `status ${JSON.stringify(st)}`);
@@ -247,6 +252,12 @@ try {
   check((await page.locator('#input-eligible').inputValue()) === 'Welcome input text.', 'restore brings back the original input value');
   check((await page.locator('#input-submit').inputValue()) === 'Submit form now.', 'restore brings back the original submit value');
   check((await page.locator('.xt-node, .xt-badge-host').count()) === 0, 'restore removes all wrappers and badges');
+
+  const cachedRequestCount = requests.length;
+  await tabMsg({ type: 'start' });
+  await page.waitForTimeout(1000);
+  check(requests.length === cachedRequestCount, 'retranslating the same page reuses successful chunk memory');
+  await tabMsg({ type: 'restore' });
 
   // Oversized "send as one chunk" path
   await tabMsg({ type: 'start' });
@@ -334,6 +345,11 @@ try {
       (await framePage.frameLocator('#blank-frame').locator('#blank-frame-text').innerText()) === 'Blank child boundary phrase.',
     'iframe restore returns original text',
   );
+  const frameCacheRequestCount = requests.length;
+  await frameTabMessage({ type: 'start' });
+  await framePage.waitForTimeout(1000);
+  check(requests.length === frameCacheRequestCount, 'retranslating the page reuses memory from the top document and frames');
+  await frameTabMessage({ type: 'restore' });
 
   // Popup & options pages load without errors
   const extId = new URL(sw.url()).host;
@@ -345,7 +361,20 @@ try {
     await pg.waitForTimeout(500);
     check(errs.length === 0, `${p} loads without errors ${errs.join(' ')}`);
     if (p.startsWith('popup')) {
+      const clearMemoryButton = pg.locator('#clearMemory');
+      const hasClearMemoryButton = (await clearMemoryButton.count()) === 1;
+      check(hasClearMemoryButton, 'popup exposes a page memory clear button');
       check((await pg.locator('#textDiagnostics').count()) === 1, 'popup exposes per-tab text diagnostics toggle');
+      if (hasClearMemoryButton) {
+        await clearMemoryButton.click();
+        await pg.waitForFunction(() => document.querySelector('#status')?.textContent === 'Memory cleared for this page.');
+      }
+      const beforePageClear = requests.length;
+      await pg.evaluate((pageUrl) => chrome.runtime.sendMessage({ type: 'clearPageMemory', pageUrl }), framePage.url());
+      await frameTabMessage({ type: 'start' });
+      await framePage.waitForTimeout(3500);
+      check(requests.length > beforePageClear, 'clearing a page removes its top-document and iframe memories');
+      await frameTabMessage({ type: 'restore' });
       await pg.locator('#textDiagnostics').check();
       await pg.waitForTimeout(300);
       const diagnosticsSettings = await sw.evaluate(async () => {
@@ -369,6 +398,7 @@ try {
       check(saved?.sourceLanguage === 'German' && saved?.targetLanguage === 'French', `tab languages saved: ${JSON.stringify(saved)}`);
     }
     if (p.startsWith('options')) {
+      check((await pg.locator('input[name=memoryRetentionDays]').inputValue()) === '30', 'options show the default 30-day memory retention');
       const opts = await pg.locator('select[name=model] option').allTextContents();
       check(JSON.stringify(opts) === JSON.stringify(['mock', 'other']), `options model list from backend: ${JSON.stringify(opts)}`);
       check((await pg.locator('select[name=model]').inputValue()) === 'mock', 'options shows saved model');

@@ -67,6 +67,9 @@
           <label>Parallel requests
             <input name="concurrency" type="number" min="1" max="16" required />
           </label>
+          <label>Remember translations for (days)
+            <input name="memoryRetentionDays" type="number" min="1" step="1" required />
+          </label>
         </div>
         <label class="check"><input name="translateDynamic" type="checkbox" /> Also translate text added to the page after the first scan</label>
         <label>Default target language

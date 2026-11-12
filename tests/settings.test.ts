@@ -1,5 +1,22 @@
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
+
+vi.mock('webextension-polyfill', () => ({ default: {} }));
+
 import { findTabPromptRule, makeTabPromptRule, resolveTabPrompt, tabPromptRulePrefixes } from '../src/shared/tabPromptRules';
+import { normalizeGlobal } from '../src/shared/settings';
+
+describe('memory retention setting', () => {
+  it('defaults to 30 days and preserves a configured positive integer', () => {
+    expect(normalizeGlobal(undefined).memoryRetentionDays).toBe(30);
+    expect(normalizeGlobal({ memoryRetentionDays: 12 }).memoryRetentionDays).toBe(12);
+  });
+
+  it('normalizes invalid stored values to 30 days', () => {
+    for (const memoryRetentionDays of [0, -1, 1.5, Number.NaN]) {
+      expect(normalizeGlobal({ memoryRetentionDays }).memoryRetentionDays).toBe(30);
+    }
+  });
+});
 
 describe('saved tab prompt rules', () => {
   const rules = [

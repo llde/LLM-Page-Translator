@@ -17,6 +17,7 @@ export interface GlobalSettings {
   targetLanguage: string;
   autoTranslateSites: string[];
   translateDynamic: boolean;
+  memoryRetentionDays: number;
 }
 
 export interface TabPromptRule {
@@ -87,6 +88,7 @@ export interface PageStatus {
 export type RuntimeRequest =
   | { type: 'getConfig' }
   | { type: 'testConnection'; settings?: GlobalSettings }
+  | { type: 'clearPageMemory'; pageUrl: string }
   | { type: 'listModels'; backend?: Pick<GlobalSettings, 'provider' | 'baseUrl' | 'apiKey'> };
 
 export interface ModelListResult {

@@ -237,6 +237,18 @@ async function init() {
     const s = await sendToTab({ type: 'retryErrors' });
     if (s) renderStatus(s);
   });
+  $('clearMemory').addEventListener('click', async () => {
+    if (!tabUrl) {
+      setStatus('Could not clear page memory: active tab URL unavailable.', true);
+      return;
+    }
+    try {
+      await browser.runtime.sendMessage({ type: 'clearPageMemory', pageUrl: tabUrl });
+      setStatus('Memory cleared for this page.');
+    } catch (e) {
+      setStatus(`Could not clear page memory: ${String(e)}`, true);
+    }
+  });
   $('resetTab').addEventListener('click', async () => {
     const keep: TabSettings = {
       tabPrompt: fields.tabPrompt.value,
