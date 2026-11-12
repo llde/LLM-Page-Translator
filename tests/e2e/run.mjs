@@ -124,8 +124,14 @@ try {
   const page = await ctx.newPage();
   const errors = [];
   const diagnostics = [];
+  const observerSummaries = [];
   page.on('pageerror', (e) => errors.push(String(e)));
   page.on('console', (message) => diagnostics.push(message.text()));
+  page.on('console', async (message) => {
+    if (message.text().includes('[LLM Page Translator] mutation observer')) {
+      observerSummaries.push(await message.args()[1].jsonValue());
+    }
+  });
   await page.goto(`http://127.0.0.1:${PORT}/story/51/`);
   await page.waitForTimeout(500);
 
@@ -157,6 +163,58 @@ try {
   check(diagnostics.some((line) => line.includes('[LLM Page Translator] chunk dispatched')), 'enabled diagnostics log chunk dispatch');
   check(diagnostics.some((line) => line.includes('[LLM Page Translator] chunk result received')), 'enabled diagnostics log result receipt');
   check(diagnostics.some((line) => line.includes('[LLM Page Translator] segment updated')), 'enabled diagnostics log DOM text replacement');
+  const observerLogStart = diagnostics.length;
+  const observerSummaryStart = observerSummaries.length;
+  const observerProbe = await page.evaluateHandle(() => {
+    const node = document.createElement('div');
+    node.id = 'observer-probe';
+    document.body.append(node);
+    return node;
+  });
+  await page.waitForTimeout(100);
+  await page.evaluate(() => {
+    const node = document.createElement('div');
+    node.id = 'observer-probe-second';
+    document.body.append(node);
+  });
+  await page.waitForTimeout(100);
+  await observerProbe.evaluate((node) => node.remove());
+  await page.waitForTimeout(700);
+  const observerLogs = diagnostics
+    .slice(observerLogStart)
+    .filter((line) => line.includes('[LLM Page Translator] mutation observer'));
+  const observerDetails = observerSummaries.slice(observerSummaryStart);
+  check(observerDetails.some((summary) => summary.childListRecords > 0), 'observer diagnostics count child-list records');
+  check(observerDetails.some((summary) => summary.debounceAction === 'scheduled'), 'observer diagnostics report a newly scheduled scan');
+  check(observerDetails.some((summary) => summary.debounceAction === 'restarted'), 'observer diagnostics report a restarted scan debounce');
+  check(
+    observerDetails.some((summary) =>
+      summary.relevantRecordCount === 0 &&
+      summary.ignoredRecordCount > 0 &&
+      summary.debounceAction === 'unchanged',
+    ),
+    'observer diagnostics report ignored-only callbacks without changing the debounce',
+  );
+  check(
+    observerLogs.length > 0 &&
+      observerDetails.length > 0 &&
+      observerDetails.every((summary) => {
+        const detail = JSON.stringify(summary);
+        const allowedKeys = [
+          'recordCount',
+          'relevantRecordCount',
+          'ignoredRecordCount',
+          'childListRecords',
+          'characterDataRecords',
+          'debounceAction',
+        ];
+        return Object.keys(summary).every((key) => allowedKeys.includes(key)) &&
+          !detail.includes('http') &&
+          !detail.includes('The first sentence is here.') &&
+          !detail.includes('observer-probe');
+      }),
+    'observer diagnostics omit URLs, text, and DOM node details',
+  );
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend request received')), 'enabled diagnostics log backend request receipt');
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend translation completed')), 'enabled diagnostics log backend translation completion');
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend translation failed')), 'enabled diagnostics log backend translation failures');
@@ -302,6 +360,8 @@ try {
   });
   const frameDiagnosticStart = backgroundDiagnostics.length;
   const framePage = await ctx.newPage();
+  const frameDiagnostics = [];
+  framePage.on('console', (message) => frameDiagnostics.push(message.text()));
   await framePage.goto(`http://127.0.0.1:${PORT}/iframe-test`);
   const frameTabMessage = (msg) =>
     sw.evaluate(async ({ message, url }) => {
@@ -343,6 +403,10 @@ try {
   check(
     !backgroundDiagnostics.slice(frameDiagnosticStart).some((line) => line.includes('[LLM Page Translator] translation memory')),
     'disabled diagnostics do not log iframe memory activity',
+  );
+  check(
+    !frameDiagnostics.some((line) => line.includes('[LLM Page Translator] mutation observer')),
+    'disabled diagnostics do not log MutationObserver callbacks in iframes',
   );
   const frameTexts = [
     'Top-document boundary phrase.',
@@ -388,6 +452,31 @@ try {
   await frameTabMessage({ type: 'start' });
   await framePage.waitForTimeout(1000);
   check(requests.length === frameCacheRequestCount, 'retranslating the page reuses memory from the top document and frames');
+  await frameTabMessage({ type: 'restore' });
+
+  const frameReloadRequestCount = requests.length;
+  await framePage.reload();
+  await framePage.waitForTimeout(500);
+  const frameReloadStart = await frameTabMessage({ type: 'start' });
+  check(!frameReloadStart.error, 'frame translation can restart after a page reload');
+  await framePage.waitForTimeout(3500);
+  const frameReloadStatus = await frameTabMessage({ type: 'status' });
+  check(
+    !frameReloadStatus.error &&
+      frameReloadStatus.status.active &&
+      frameReloadStatus.status.total > 0 &&
+      frameReloadStatus.status.done === frameReloadStatus.status.total,
+    `all frame translations finish after reload ${JSON.stringify(frameReloadStatus.status)}`,
+  );
+  check(
+    (await framePage.frameLocator('#cross-origin-frame').frameLocator('#nested-frame').locator('#nested-frame-text').innerText())
+      .includes('IT:Nested child boundary phrase.'),
+    'nested about:srcdoc text is translated after reload',
+  );
+  check(
+    requests.length === frameReloadRequestCount,
+    'reloading the page reuses stored translations for internal iframe documents',
+  );
   await frameTabMessage({ type: 'restore' });
 
   // Popup & options pages load without errors

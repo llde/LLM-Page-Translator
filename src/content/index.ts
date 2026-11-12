@@ -13,7 +13,7 @@ import {
   type TabRequest,
 } from '../shared/types';
 import { createBadge } from './badge';
-import { diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
+import { analyzeMutationBatch, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
 import { createSegSpan, isOwnNode, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
@@ -453,9 +453,26 @@ function isRelevantMutation(m: MutationRecord): boolean {
 function startObserver(): void {
   if (observer || !document.body) return;
   observer = new MutationObserver((records) => {
-    if (!records.some(isRelevantMutation)) return;
+    const analysis = analyzeMutationBatch(records, isRelevantMutation, !!cfg?.textDiagnostics);
+    const debounceAction = analysis.hasRelevantRecords
+      ? debounce ? 'restarted' : 'scheduled'
+      : 'unchanged';
+    if (analysis.relevantRecords) {
+      logTextDiagnostic('mutation observer', {
+        recordCount: records.length,
+        relevantRecordCount: analysis.relevantRecords.length,
+        ignoredRecordCount: records.length - analysis.relevantRecords.length,
+        childListRecords: records.filter((record) => record.type === 'childList').length,
+        characterDataRecords: records.filter((record) => record.type === 'characterData').length,
+        debounceAction,
+      });
+    }
+    if (!analysis.hasRelevantRecords) return;
     if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(scan, MUTATION_DEBOUNCE_MS);
+    debounce = setTimeout(() => {
+      debounce = null;
+      scan();
+    }, MUTATION_DEBOUNCE_MS);
   });
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 }

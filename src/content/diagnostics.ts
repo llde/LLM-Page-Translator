@@ -12,6 +12,18 @@ export function diagnosticElementPath(el: Element): string {
   return parts.join(' > ');
 }
 
+export function analyzeMutationBatch<T>(
+  records: readonly T[],
+  isRelevant: (record: T) => boolean,
+  includeRelevantRecords: boolean,
+): { hasRelevantRecords: boolean; relevantRecords?: T[] } {
+  if (!includeRelevantRecords) {
+    return { hasRelevantRecords: records.some(isRelevant) };
+  }
+  const relevantRecords = records.filter(isRelevant);
+  return { hasRelevantRecords: relevantRecords.length > 0, relevantRecords };
+}
+
 export function logTextDiagnostic(event: string, detail: unknown): void {
   console.info(`[LLM Page Translator] ${event}`, detail);
 }

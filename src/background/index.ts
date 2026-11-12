@@ -36,6 +36,24 @@ const CORS_HINT =
   'Hint: check that the backend URL is correct and reachable. Ollama rejects requests from browser extensions ' +
   'unless allowed, e.g. start it with OLLAMA_ORIGINS="chrome-extension://*,moz-extension://*".';
 
+async function getFrameUrlAncestry(tabId: number | undefined, frameId: number | undefined): Promise<string[] | undefined> {
+  if (tabId === undefined || frameId === undefined) return undefined;
+  const frames = await browser.webNavigation.getAllFrames({ tabId });
+  if (!frames) return undefined;
+
+  const framesById = new Map(frames.map((frame) => [frame.frameId, frame]));
+  const ancestry: string[] = [];
+  let currentFrameId: number | undefined = frameId;
+  while (currentFrameId !== undefined) {
+    const frame = framesById.get(currentFrameId);
+    if (!frame) return undefined;
+    ancestry.unshift(frame.url);
+    if (frame.parentFrameId < 0) return ancestry;
+    currentFrameId = frame.parentFrameId;
+  }
+  return undefined;
+}
+
 async function getSettings(tabId: number | undefined, url?: string): Promise<EffectiveSettings> {
   const g = await loadGlobal();
   const t = tabId !== undefined ? await loadTab(tabId) : {};
@@ -159,9 +177,18 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
         diagnosticsEnabled = cfg.textDiagnostics;
         const pageUrl = port.sender?.tab?.url;
         const frameId = port.sender?.frameId;
-        const frameUrl = port.sender?.url;
+        let frameUrlAncestry: string[] | undefined;
+        try {
+          frameUrlAncestry = await getFrameUrlAncestry(tabId, frameId);
+        } catch (error) {
+          if (cfg.textDiagnostics) {
+            console.warn('[LLM Page Translator] translation memory ancestry unavailable', {
+              error: error instanceof Error ? error.message : String(error),
+            });
+          }
+        }
         const memoryContext: TranslationMemoryContext | undefined =
-          pageUrl && frameId !== undefined && frameUrl ? { pageUrl, frameId, frameUrl } : undefined;
+          pageUrl && frameUrlAncestry ? { pageUrl, frameUrlAncestry } : undefined;
         const cached = memoryContext ? await getTranslationMemory(memoryContext, cfg, msg.segments) : undefined;
         let translations: Record<number, string>;
         if (cached) {

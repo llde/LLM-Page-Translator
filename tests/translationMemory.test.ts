@@ -34,8 +34,19 @@ const settings = effectiveConfig(DEFAULT_SETTINGS, {});
 const segments = [{ id: 1, text: 'Hello.' }, { id: 2, text: 'Goodbye.' }];
 const translations = { 1: 'Ciao.', 2: 'Arrivederci.' };
 
-function context(pageUrl: string, frameId = 0, frameUrl = pageUrl): TranslationMemoryContext {
-  return { pageUrl, frameId, frameUrl };
+type TestTranslationMemoryContext = TranslationMemoryContext & {
+  frameId: number;
+  frameUrl: string;
+  frameUrlAncestry: string[];
+};
+
+function context(
+  pageUrl: string,
+  frameId = 0,
+  frameUrl = pageUrl,
+  frameUrlAncestry = frameUrl === pageUrl ? [pageUrl] : [pageUrl, frameUrl],
+): TestTranslationMemoryContext {
+  return { pageUrl, frameId, frameUrl, frameUrlAncestry };
 }
 
 afterEach(() => {
@@ -44,6 +55,33 @@ afterEach(() => {
 });
 
 describe('translation memory', () => {
+  it('allows identical-URL sibling frames under the same parent to share memory across frame IDs', async () => {
+    const page = 'https://example.com/article';
+    const frameUrl = 'https://example.com/embed';
+    await setTranslationMemory(context(page, 4, frameUrl), settings, segments, translations);
+
+    await expect(getTranslationMemory(context(page, 9, frameUrl), settings, segments)).resolves.toEqual(translations);
+  });
+
+  it('isolates frames with different URL ancestry even when their final frame URLs match', async () => {
+    const page = 'https://example.com/article';
+    const frameUrl = 'https://example.com/embed';
+    await setTranslationMemory(
+      context(page, 4, frameUrl, [page, 'https://example.com/parent-a', frameUrl]),
+      settings,
+      segments,
+      translations,
+    );
+
+    await expect(
+      getTranslationMemory(
+        context(page, 4, frameUrl, [page, 'https://example.com/parent-b', frameUrl]),
+        settings,
+        segments,
+      ),
+    ).resolves.toBeUndefined();
+  });
+
   it('reuses a saved chunk with current segment IDs but isolates another frame', async () => {
     const page = 'https://example.com/article';
     await setTranslationMemory(context(page), settings, segments, translations);

@@ -9,8 +9,7 @@ const DAY_MS = 24 * 60 * 60 * 1000;
 
 export interface TranslationMemoryContext {
   pageUrl: string;
-  frameId: number;
-  frameUrl: string;
+  frameUrlAncestry: string[];
 }
 
 function normalizeUrl(url: string): string {
@@ -49,8 +48,7 @@ async function entryKey(
 ): Promise<string> {
   const page = await pageHash(context.pageUrl);
   const identity = JSON.stringify({
-    frameId: context.frameId,
-    frameUrl: normalizeUrl(context.frameUrl),
+    frameUrlAncestry: context.frameUrlAncestry.map(normalizeUrl),
     settings: translationSettings(settings),
     text: segments.map((segment) => segment.text),
   });
