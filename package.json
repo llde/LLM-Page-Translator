@@ -1,0 +1,27 @@
+{
+  "name": "llm-page-translator",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Translate web pages with Ollama / OpenWebUI / OpenAI-compatible LLMs (Firefox + Chromium).",
+  "type": "module",
+  "scripts": {
+    "build:chrome": "node build.mjs chrome",
+    "build:firefox": "node build.mjs firefox",
+    "build": "node build.mjs chrome && node build.mjs firefox",
+    "watch:chrome": "node build.mjs chrome --watch",
+    "watch:firefox": "node build.mjs firefox --watch",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "e2e": "node build.mjs chrome && node tests/e2e/run.mjs"
+  },
+  "devDependencies": {
+    "@types/webextension-polyfill": "^0.12.6",
+    "esbuild": "^0.28.2",
+    "playwright": "^1.64.1",
+    "typescript": "^7.0.2",
+    "vitest": "^5.0.5"
+  },
+  "dependencies": {
+    "webextension-polyfill": "^0.12.0"
+  }
+}

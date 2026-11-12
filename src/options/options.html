@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LLM Page Translator – Settings</title>
+  <link rel="stylesheet" href="options.css" />
+</head>
+<body>
+  <main>
+    <h1>LLM Page Translator – Settings</h1>
+
+    <div id="permBanner" class="banner" hidden>
+      Firefox requires you to grant access to websites so the extension can read pages and contact the backend.
+      <button id="grantPerm" type="button">Grant access to all sites</button>
+    </div>
+
+    <form id="form">
+      <fieldset>
+        <legend>Backend</legend>
+        <label>Provider
+          <select name="provider">
+            <option value="ollama">Ollama (/api/chat)</option>
+            <option value="openwebui">OpenWebUI (/api/chat/completions)</option>
+            <option value="openai">OpenAI-compatible (/v1/chat/completions)</option>
+          </select>
+        </label>
+        <label>Base URL
+          <input name="baseUrl" type="url" required placeholder="http://localhost:11434" />
+          <small id="urlHint"></small>
+        </label>
+        <label>API key <small>(optional for Ollama / local servers)</small>
+          <input name="apiKey" type="password" autocomplete="off" />
+        </label>
+        <label>Model
+          <span class="inline">
+            <select name="model"></select>
+            <button type="button" id="refreshModels" title="Reload the model list from the backend">↻</button>
+          </span>
+          <small id="modelHint"></small>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Generation</legend>
+        <div class="grid">
+          <label>Context window (tokens)
+            <input name="contextWindow" type="number" min="256" step="1" required />
+          </label>
+          <label>Max response tokens
+            <input name="maxTokens" type="number" min="16" step="1" required />
+          </label>
+          <label>Temperature
+            <input name="temperature" type="number" min="0" max="2" step="any" required />
+          </label>
+          <label>Request timeout (s)
+            <input name="requestTimeoutSec" type="number" min="5" step="1" required />
+          </label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend>Chunking &amp; page</legend>
+        <div class="grid">
+          <label>Max chunk size (characters)
+            <input name="maxChunkSize" type="number" min="16" step="1" required />
+          </label>
+          <label>Parallel requests
+            <input name="concurrency" type="number" min="1" max="16" required />
+          </label>
+        </div>
+        <label class="check"><input name="translateDynamic" type="checkbox" /> Also translate text added to the page after the first scan</label>
+        <label>Default target language
+          <select name="targetLanguage"></select>
+        </label>
+        <label>Always translate these sites (one hostname per line)
+          <textarea name="autoTranslateSites" rows="3" placeholder="example.com"></textarea>
+        </label>
+      </fieldset>
+
+      <fieldset>
+        <legend>Prompts</legend>
+        <label>System prompt
+          <textarea name="systemPrompt" rows="5"></textarea>
+          <small>Output-format instructions (the &lt;translated_text&gt; block and [n] markers) are always appended automatically.</small>
+        </label>
+        <label>Default tab prompt (context used for new tabs; editable per tab from the toolbar popup)
+          <textarea name="defaultTabPrompt" rows="3"></textarea>
+        </label>
+      </fieldset>
+
+      <div class="actions">
+        <button type="submit" class="primary">Save</button>
+        <button type="button" id="test">Test connection</button>
+        <button type="button" id="reset">Restore defaults</button>
+        <span id="msg"></span>
+      </div>
+      <pre id="details" hidden></pre>
+    </form>
+  </main>
+  <script src="options.js"></script>
+</body>
+</html>

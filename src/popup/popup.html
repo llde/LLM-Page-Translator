@@ -1,0 +1,70 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>LLM Page Translator</title>
+  <link rel="stylesheet" href="popup.css" />
+</head>
+<body>
+  <header>
+    <strong>LLM Page Translator</strong>
+    <a href="#" id="openOptions" title="Global settings">⚙ Settings</a>
+  </header>
+
+  <div id="permBanner" class="banner" hidden>
+    The extension needs access to websites to read pages and contact the backend.
+    <button id="grantPerm" type="button">Grant access</button>
+  </div>
+
+  <div class="actions">
+    <button id="translate" class="primary" type="button">Translate page</button>
+    <button id="restore" type="button">Restore original</button>
+    <button id="retry" type="button" hidden>Retry failed</button>
+  </div>
+  <div id="status" class="status">–</div>
+
+  <label class="check">
+    <input type="checkbox" id="autoSite" />
+    Always translate <span id="host">this site</span>
+  </label>
+
+  <h2>This tab</h2>
+  <div class="grid2">
+    <label>Source language
+      <select id="sourceLanguage" title="Set it when the page language is ambiguous (e.g. Portuguese vs Spanish)"></select>
+    </label>
+    <label>Target language
+      <select id="targetLanguage"></select>
+    </label>
+  </div>
+  <label>Tab prompt (translation context / extra instructions)
+    <textarea id="tabPrompt" rows="4" placeholder="e.g. This is a legal contract; keep defined terms in English."></textarea>
+  </label>
+  <label>Save prompt for path
+    <select id="promptRulePath" disabled></select>
+  </label>
+  <button id="savePromptRule" type="button" disabled>Save for selected path and subpages</button>
+  <div id="promptRuleStatus" class="hint prompt-rule-status" aria-live="polite"></div>
+  <label class="check" title="Logs short text previews in this tab's DevTools console">
+    <input type="checkbox" id="textDiagnostics" />
+    Text scan diagnostics
+  </label>
+
+  <details>
+    <summary>Per-tab overrides</summary>
+    <label>Max chunk size (chars)
+      <input id="maxChunkSize" type="number" min="16" step="1" />
+    </label>
+    <label>Model
+      <select id="model"></select>
+    </label>
+    <label>Temperature
+      <input id="temperature" type="number" min="0" max="2" step="any" />
+    </label>
+    <button id="resetTab" type="button">Reset to global defaults</button>
+  </details>
+  <p class="hint">Changes are saved automatically and apply to the next chunks sent from this tab.</p>
+
+  <script src="popup.js"></script>
+</body>
+</html>
