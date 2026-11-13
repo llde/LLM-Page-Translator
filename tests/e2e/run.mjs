@@ -67,7 +67,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     return res.end(req.url === '/iframe-test' ? FRAME_PAGE
-      : req.url === '/numbers-test' || req.url === '/mutation-target-test' || req.url.startsWith('/html-number-test') ? '<!doctype html><html><body></body></html>'
+      : req.url === '/numbers-test' || req.url === '/mutation-target-test' || req.url.startsWith('/direct-cache-test') || req.url.startsWith('/html-number-test') ? '<!doctype html><html><body></body></html>'
         : PAGE);
   }
   let body = '';
@@ -772,6 +772,219 @@ try {
   });
   check(afterRestore, 'restore returns page setters to normal behavior');
   await setterPage.close();
+
+  const directPage = await ctx.newPage();
+  const directObserverSummaries = [];
+  directPage.on('pageerror', (e) => errors.push(String(e)));
+  directPage.on('console', async (message) => {
+    if (message.text().includes('[LLM Page Translator] mutation observer')) {
+      directObserverSummaries.push(await message.args()[1].jsonValue());
+    }
+  });
+  const directUrl = `http://127.0.0.1:${PORT}/direct-cache-test`;
+  const directTabMsg = (msg) => sw.evaluate(async ({ m, url }) => {
+    const [tab] = await chrome.tabs.query({ url });
+    return chrome.tabs.sendMessage(tab.id, m, { frameId: 0 });
+  }, { m: msg, url: directUrl });
+  await directPage.goto(directUrl);
+  await directPage.evaluate(() => {
+    document.body.innerHTML = '<p id="direct-source">Direct cache phrase.</p><p id="direct-target"></p><p id="direct-unrelated"></p><p id="direct-hidden" style="display:none"></p><p id="direct-excluded" translate="no"></p><p id="direct-editable" contenteditable="true"></p><p id="direct-settings"></p><p id="direct-reset-settings"></p><iframe id="direct-frame" srcdoc="<p id=frame-first></p><p id=frame-second></p><p id=frame-third></p>"></iframe>';
+  });
+  await directPage.waitForTimeout(500);
+  await directTabMsg({ type: 'start' });
+  await directPage.waitForFunction(() => document.querySelector('#direct-source')?.textContent === 'IT:Direct cache phrase.', null, { timeout: 15000 });
+  await directTabMsg({ type: 'setDiagnostics', enabled: true });
+  const directRequests = requests.length;
+  const directChecks = await directPage.evaluate(() => {
+    const target = document.querySelector('#direct-target');
+    target.textContent = 'Direct cache phrase.';
+    const immediate = target.textContent;
+    document.querySelector('#direct-hidden').textContent = 'Direct cache phrase.';
+    document.querySelector('#direct-excluded').textContent = 'Direct cache phrase.';
+    document.querySelector('#direct-editable').textContent = 'Direct cache phrase.';
+    document.querySelector('#direct-unrelated').textContent = 'Unrelated direct update.';
+    return {
+      immediate,
+      hidden: document.querySelector('#direct-hidden').textContent,
+      excluded: document.querySelector('#direct-excluded').textContent,
+      editable: document.querySelector('#direct-editable').textContent,
+    };
+  });
+  check(directChecks.immediate === 'IT:Direct cache phrase.', 'cached textContent assignment is translated synchronously');
+  check(directChecks.hidden === 'Direct cache phrase.', 'cached textContent does not bypass visibility exclusions');
+  check(directChecks.excluded === 'Direct cache phrase.' && directChecks.editable === 'Direct cache phrase.',
+    'cached textContent respects translation-disabled and editable elements');
+  await directPage.waitForFunction(() => document.querySelector('#direct-unrelated')?.textContent?.includes('IT:Unrelated direct update.'), null, { timeout: 15000 });
+  check(requests.length === directRequests + 1, 'cached assignment avoids provider requests while unrelated mutations are translated');
+  check(directObserverSummaries.some((summary) => summary.mutations.some((mutation) => mutation.target.path.includes('#direct-unrelated'))) &&
+    !directObserverSummaries.some((summary) => summary.mutations.some((mutation) => mutation.target.path.includes('#direct-target'))),
+  'direct cache hit bypasses observer processing without suppressing unrelated mutations');
+  const directTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, directUrl);
+  const frameId = await sw.evaluate(async (tabId) => {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const frame = frames.find((entry) => entry.parentFrameId === 0);
+    await chrome.tabs.sendMessage(tabId, { type: 'start' }, { frameId: frame.frameId });
+    return frame.frameId;
+  }, directTabId);
+  const directFrame = directPage.frameLocator('#direct-frame');
+  const frameFirst = await directFrame.locator('#frame-first').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(frameFirst === 'Direct cache phrase.', 'top-document memory is not used for iframe setters');
+  await directFrame.locator('#frame-first').waitFor();
+  await directPage.waitForFunction(() => {
+    const frame = document.querySelector('#direct-frame').contentDocument;
+    return frame?.querySelector('#frame-first')?.textContent === 'IT:Direct cache phrase.';
+  }, null, { timeout: 15000 });
+  const frameSecond = await directFrame.locator('#frame-second').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(frameSecond === 'IT:Direct cache phrase.', 'iframe setters synchronously use their own memory');
+  const settingsPage = await ctx.newPage();
+  await settingsPage.goto(`chrome-extension://${extId}/options/options.html`);
+  await settingsPage.evaluate(async (tabId) => {
+    await chrome.storage.session.set({ [`tab:${tabId}`]: { targetLanguage: 'French' } });
+  }, directTabId);
+  await directPage.waitForTimeout(500);
+  const changedSettings = await directPage.locator('#direct-settings').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(changedSettings === 'Direct cache phrase.', 'changed translation settings invalidate the synchronous lookup');
+  const frameSettings = await directFrame.locator('#frame-third').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(frameSettings === 'Direct cache phrase.', 'changed translation settings invalidate iframe lookups');
+  await settingsPage.evaluate(async (tabId) => {
+    await chrome.storage.session.remove(`tab:${tabId}`);
+  }, directTabId);
+  await directPage.waitForTimeout(500);
+  const resetSettings = await directPage.locator('#direct-reset-settings').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(resetSettings === 'IT:Direct cache phrase.', 'restoring settings reloads the matching synchronous cache');
+  await settingsPage.close();
+  await sw.evaluate(async ({ tabId, frameId }) => chrome.tabs.sendMessage(tabId, { type: 'restore' }, { frameId }), { tabId: directTabId, frameId });
+  await directTabMsg({ type: 'restore' });
+  check((await directPage.locator('#direct-target').textContent()) === 'Direct cache phrase.', 'restore recovers the source of a direct cache hit');
+  await directPage.reload();
+  await directPage.evaluate(() => {
+    document.body.innerHTML = '<p id="direct-target"></p><p id="direct-text-node"></p><p id="direct-after-clear"></p><iframe id="direct-frame" srcdoc="<p id=frame-first></p><p id=frame-after-clear></p>"></iframe>';
+  });
+  await directPage.waitForTimeout(500);
+  await directTabMsg({ type: 'start' });
+  const reloadedImmediate = await directPage.locator('#direct-target').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(reloadedImmediate === 'IT:Direct cache phrase.', 'persistent cache is available synchronously after page reload');
+  const textNodeImmediate = await directPage.locator('#direct-text-node').evaluate((target) => {
+    target.appendChild(document.createTextNode('placeholder'));
+    const text = target.firstChild;
+    text.textContent = 'Direct cache phrase.';
+    return { rendered: target.textContent, reference: text.textContent, connected: target.contains(text) };
+  });
+  check(textNodeImmediate.rendered === 'IT:Direct cache phrase.' &&
+    textNodeImmediate.reference === 'IT:Direct cache phrase.' && textNodeImmediate.connected,
+  'cached text-node assignment updates and retains the assigned text node');
+  await sw.evaluate(async (tabId) => {
+    const frames = await chrome.webNavigation.getAllFrames({ tabId });
+    const frame = frames.find((entry) => entry.parentFrameId === 0);
+    await chrome.tabs.sendMessage(tabId, { type: 'start' }, { frameId: frame.frameId });
+  }, directTabId);
+  const reloadedFrame = directPage.frameLocator('#direct-frame');
+  const reloadedFrameHit = await reloadedFrame.locator('#frame-first').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(reloadedFrameHit === 'IT:Direct cache phrase.', 'iframe memory is preloaded after page reload');
+  const clearPage = await ctx.newPage();
+  await clearPage.goto(`chrome-extension://${extId}/options/options.html`);
+  await clearPage.evaluate(({ url, tabId }) =>
+    chrome.runtime.sendMessage({ type: 'clearPageMemory', pageUrl: url, tabId }), { url: directUrl, tabId: directTabId });
+  await clearPage.close();
+  await directPage.waitForTimeout(300);
+  const clearedRequestCount = requests.length;
+  const afterClear = await directPage.locator('#direct-after-clear').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(afterClear === 'Direct cache phrase.', 'clearing page memory invalidates synchronous cache entries');
+  const frameAfterClear = await reloadedFrame.locator('#frame-after-clear').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(frameAfterClear === 'Direct cache phrase.', 'clearing page memory invalidates iframe lookup entries');
+  await directPage.waitForFunction(() =>
+    document.querySelector('#direct-after-clear')?.textContent === 'IT:Direct cache phrase.' &&
+    document.querySelector('#direct-frame')?.contentDocument?.querySelector('#frame-after-clear')?.textContent === 'IT:Direct cache phrase.',
+  null, { timeout: 15000 });
+  check(requests.length >= clearedRequestCount + 2, 'cleared top and iframe cache entries are translated again');
+  await directPage.close();
+
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, separateNumbers: true } });
+  });
+  const directNumberPage = await ctx.newPage();
+  const directNumberUrl = `http://127.0.0.1:${PORT}/direct-cache-test-numbers`;
+  await directNumberPage.goto(directNumberUrl);
+  await directNumberPage.evaluate(() => {
+    document.body.innerHTML = '<p id="number-source">Balance -12.5 units.</p><p id="number-target"></p><p id="number-text-node"></p>';
+  });
+  await directNumberPage.waitForTimeout(500);
+  const directNumberTabMsg = (msg) => sw.evaluate(async ({ m, url }) => {
+    const [tab] = await chrome.tabs.query({ url });
+    return chrome.tabs.sendMessage(tab.id, m, { frameId: 0 });
+  }, { m: msg, url: directNumberUrl });
+  await directNumberTabMsg({ type: 'start' });
+  await directNumberPage.waitForFunction(() => document.querySelector('#number-source')?.textContent === 'IT:Balance -12.5 IT:units.', null, { timeout: 15000 });
+  const numberRequestCount = requests.length;
+  const directNumber = await directNumberPage.locator('#number-target').evaluate((target) => {
+    target.textContent = 'Balance -20.5 units.';
+    return target.textContent;
+  });
+  check(directNumber === 'IT:Balance -20.5 IT:units.', 'number-separated cached chunks are applied synchronously');
+  const numberTextNode = await directNumberPage.locator('#number-text-node').evaluate((target) => {
+    const text = document.createTextNode('placeholder');
+    target.appendChild(text);
+    text.textContent = 'Balance -20.5 units.';
+    return { value: text.textContent, connected: target.contains(text) };
+  });
+  check(numberTextNode.value === 'IT:Balance -20.5 IT:units.' && numberTextNode.connected,
+    'number-separated text-node cache hits retain the assigned node');
+  await directNumberPage.waitForTimeout(1000);
+  check(requests.length === numberRequestCount, 'number-separated direct cache hits avoid provider requests');
+  await directNumberTabMsg({ type: 'restore' });
+  check((await directNumberPage.locator('#number-target').textContent()) === 'Balance -20.5 units.',
+    'restore retains the original numeric content of a direct cache hit');
+  check((await directNumberPage.locator('#number-text-node').textContent()) === 'Balance -20.5 units.',
+    'restore retains the original text-node numeric content');
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, translateDynamic: false } });
+  });
+  await directNumberPage.reload();
+  await directNumberPage.evaluate(() => { document.body.innerHTML = '<p id="number-target"></p>'; });
+  await directNumberPage.waitForTimeout(500);
+  await directNumberTabMsg({ type: 'start' });
+  const disabledDynamic = await directNumberPage.locator('#number-target').evaluate((target) => {
+    target.textContent = 'Balance -20.5 units.';
+    return target.textContent;
+  });
+  check(disabledDynamic === 'Balance -20.5 units.', 'disabled dynamic translation leaves cached textContent assignments unchanged');
+  await directNumberPage.waitForTimeout(1000);
+  check((await directNumberPage.locator('#number-target').textContent()) === 'Balance -20.5 units.',
+    'disabled dynamic translation does not process cached assignments later');
+  await directNumberPage.close();
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, translateDynamic: true } });
+  });
 
   for (const separateNumbers of [false, true]) {
     await sw.evaluate(async (separate) => {

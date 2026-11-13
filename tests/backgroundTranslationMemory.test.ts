@@ -4,6 +4,7 @@ const harness = vi.hoisted(() => ({
   onConnectListener: undefined as ((port: unknown) => void) | undefined,
   onMessageListener: undefined as ((message: unknown, sender: unknown) => unknown) | undefined,
   onPortMessageListener: undefined as ((message: unknown) => Promise<void>) | undefined,
+  onStorageChanged: undefined as ((changes: Record<string, unknown>, area: string) => void) | undefined,
   config: {
     provider: 'ollama',
     model: 'mock',
@@ -13,6 +14,9 @@ const harness = vi.hoisted(() => ({
   },
   getTranslationMemory: vi.fn(),
   browser: {
+    storage: { onChanged: { addListener(listener: (changes: Record<string, unknown>, area: string) => void) {
+      harness.onStorageChanged = listener;
+    } } },
     runtime: {
       getURL: () => 'chrome-extension://test/',
       onConnect: {
@@ -34,6 +38,7 @@ const harness = vi.hoisted(() => ({
     },
     tabs: {
       onRemoved: { addListener: vi.fn() },
+      sendMessage: vi.fn(async () => undefined),
     },
   },
 }));
@@ -89,6 +94,11 @@ describe('background translation memory context', () => {
   afterEach(() => {
     vi.unstubAllGlobals();
     vi.clearAllMocks();
+  });
+
+  it('invalidates the tab index after a session setting change without relying on worker-local registration', () => {
+    harness.onStorageChanged?.({ 'tab:51': { newValue: { targetLanguage: 'French' } } }, 'session');
+    expect(harness.browser.tabs.sendMessage).toHaveBeenCalledWith(51, { type: 'invalidateMemoryIndex' });
   });
 
   it('returns a memory hit without entering the provider path', async () => {

@@ -94,6 +94,7 @@ export interface PageStatus {
 /** Messages handled by background via runtime.sendMessage. */
 export type RuntimeRequest =
   | { type: 'getConfig' }
+  | { type: 'getTranslationMemoryIndex' }
   | { type: 'installSetterGuard' }
   | { type: 'testConnection'; settings?: GlobalSettings }
   | { type: 'clearPageMemory'; pageUrl: string; tabId: number }
@@ -112,6 +113,7 @@ export type TabRequest =
   | { type: 'start' }
   | { type: 'restore' }
   | { type: 'status' }
+  | { type: 'invalidateMemoryIndex' }
   | { type: 'retryErrors' }
   | { type: 'setDiagnostics'; enabled: boolean };
 

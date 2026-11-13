@@ -2,6 +2,7 @@ import type { Runtime } from 'webextension-polyfill';
 import { browser } from '../shared/browser';
 import { buildChunks } from '../shared/chunker';
 import { splitNumberSeparatedPhrases, splitOversized, splitPhrases } from '../shared/phrases';
+import { isStoredTranslation, type TranslationMemoryIndex } from '../shared/translationMemory';
 import {
   PORT_NAME,
   type ContentConfig,
@@ -14,7 +15,7 @@ import {
 } from '../shared/types';
 import { createBadge } from './badge';
 import { analyzeMutationBatch, diagnosticMutation, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
-import { createSegSpan, isOwnNode, matchesOriginalInnerHTML, originalTextContent, preserveTranslatedInnerHTML, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
+import { canTranslateTextAssignment, createSegSpan, createWrappedText, isOwnNode, matchesOriginalInnerHTML, originalTextContent, preserveTranslatedInnerHTML, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode, type WrappedSegment } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
 type ChunkState = 'checking' | 'queued' | 'busy' | 'done' | 'error' | 'oversized';
@@ -63,10 +64,158 @@ let observer: MutationObserver | null = null;
 let debounce: ReturnType<typeof setTimeout> | null = null;
 let setterGuardInstalled = false;
 let ignoredSliceText = new WeakMap<Text, string>();
+let memoryIndex: TranslationMemoryIndex | null = null;
+let cachedChunks = new Map<string, string[]>();
+let pendingIndex: { changes: { key: string; value: unknown }[]; invalidated: boolean } | null = null;
+
+function rebuildCachedChunks(): void {
+  cachedChunks = new Map(Object.values(memoryIndex?.entries ?? {}).map(({ texts, translations }) =>
+    [JSON.stringify(texts), translations]));
+}
+
+function applyIndexChange(index: TranslationMemoryIndex, key: string, value: unknown): void {
+  if (!key.startsWith(index.prefix)) return;
+  if (isStoredTranslation(value) && value.scope === index.scope) {
+    index.entries[key] = { texts: value.texts, translations: value.translations };
+  } else {
+    delete index.entries[key];
+  }
+}
+
+function invalidateMemoryIndex(): void {
+  memoryIndex = null;
+  cachedChunks.clear();
+  if (pendingIndex) pendingIndex.invalidated = true;
+  if (active && cfg?.translateDynamic) {
+    const pending = { changes: [] as { key: string; value: unknown }[], invalidated: false };
+    pendingIndex = pending;
+    void loadMemoryIndex(pending);
+  }
+}
+
+browser.storage.onChanged.addListener((changes, area) => {
+  let updated = false;
+  for (const [key, change] of Object.entries(changes)) {
+    if ((area === 'local' && key === 'settings') || ((area === 'local' || area === 'session') && key.startsWith('tab:'))) {
+      invalidateMemoryIndex();
+    } else if (area === 'local') {
+      if (pendingIndex) pendingIndex.changes.push({ key, value: change.newValue });
+      if (memoryIndex && key.startsWith(memoryIndex.prefix)) {
+        applyIndexChange(memoryIndex, key, change.newValue);
+        updated = true;
+      }
+    }
+  }
+  if (updated && memoryIndex) rebuildCachedChunks();
+});
+
+async function loadMemoryIndex(pending: NonNullable<typeof pendingIndex>): Promise<void> {
+  try {
+    const index = await browser.runtime.sendMessage({ type: 'getTranslationMemoryIndex' }) as TranslationMemoryIndex;
+    if (pendingIndex !== pending || pending.invalidated) return;
+    for (const { key, value } of pending.changes) applyIndexChange(index, key, value);
+    memoryIndex = index;
+    rebuildCachedChunks();
+  } catch (error) {
+    console.warn('[LLM Page Translator] Could not load the synchronous translation memory index', error);
+  } finally {
+    if (pendingIndex === pending) pendingIndex = null;
+  }
+}
+
+function applyCachedText(target: Node, value: string): boolean {
+  const config = cfg;
+  if (!config?.translateDynamic || !memoryIndex || !canTranslateTextAssignment(target, value)) return false;
+  const parts = config.separateNumbers
+    ? splitNumberSeparatedPhrases(value)
+    : splitPhrases(value).map((raw) => ({ raw, kind: 'text' as const }));
+  const planned: { ids: number[]; size: number; translations: string[] }[] = [];
+  let batch: SegmentPayload[] = [];
+  let nextId = 0;
+  const planBatch = (): boolean => {
+    const batchPlans = buildChunks(batch, config.maxChunkSize);
+    const textsById = new Map(batch.map(({ id, text }) => [id, text]));
+    for (const plan of batchPlans) {
+      if (plan.oversized) return false;
+      const texts = plan.segmentIds.map((id) => textsById.get(id)!);
+      const translations = cachedChunks.get(JSON.stringify(texts));
+      if (!translations || translations.length !== texts.length) return false;
+      planned.push({ ids: plan.segmentIds, size: plan.size, translations });
+    }
+    batch = [];
+    return true;
+  };
+  for (const part of parts) {
+    if (part.kind === 'number') {
+      if (!planBatch()) return false;
+    } else if (part.kind === 'text') {
+      batch.push({ id: nextId++, text: part.raw });
+    }
+  }
+  if (!planBatch() || !planned.length) return false;
+  const parent = target.nodeType === Node.ELEMENT_NODE ? target as Element : target.parentElement;
+  if (!parent) return false;
+  let domLevel = 0;
+  for (let element: Element | null = parent; element && element !== document.body; element = element.parentElement) domLevel++;
+  const textTarget = target instanceof Text ? target : undefined;
+  const wrapped = createWrappedText(value, () => nextSegId++, config.separateNumbers, !!textTarget);
+  const segments = wrapped.segments.filter((segment): segment is WrappedSegment => !('separator' in segment));
+  let appliedPlans = planned;
+  if (textTarget) {
+    const translations = new Map<number, string>();
+    for (const plan of planned) plan.ids.forEach((id, i) => translations.set(id, plan.translations[i]));
+    let id = 0;
+    const rendered = parts.map((part) => {
+      if (part.kind !== 'text') return part.raw;
+      const { lead, trail } = splitWhitespace(part.raw);
+      return lead + translations.get(id++)! + trail;
+    }).join('');
+    const { lead, trail } = splitWhitespace(value);
+    appliedPlans = [{
+      ids: [0],
+      size: planned.reduce((size, plan) => size + plan.size, 0),
+      translations: [rendered.slice(lead.length, rendered.length - trail.length)],
+    }];
+  }
+  const segmentIds: number[] = [];
+  for (const plan of appliedPlans) {
+    const ids: number[] = [];
+    plan.ids.forEach((id, i) => {
+      const segment = segments[id];
+      const translation = plan.translations[i];
+      const { lead, core, trail } = splitWhitespace(segment.raw);
+      segment.span.textContent = lead + translation + trail;
+      segment.span.title = core;
+      segs.set(segment.id, { id: segment.id, element: segment.span, raw: segment.raw, domLevel, translation });
+      ids.push(segment.id);
+      segmentIds.push(segment.id);
+    });
+    const chunk: Chunk = { id: nextChunkId++, segIds: ids, size: plan.size, state: 'done' };
+    chunks.set(chunk.id, chunk);
+  }
+  if (observer) processMutationRecords(observer.takeRecords());
+  const mutationTarget = target.nodeType === Node.ELEMENT_NODE ? target : target.parentNode;
+  if (target instanceof Element) target.replaceChildren(wrapped.container);
+  else {
+    target.parentNode!.replaceChild(wrapped.container, target);
+    const span = segments[0].span;
+    const rendered = span.textContent ?? '';
+    span.replaceChildren(target);
+    if (textTarget) textTarget.data = rendered;
+  }
+  if (observer) {
+    const records = observer.takeRecords();
+    const ownRecord = records.find((record) => record.target === mutationTarget &&
+      Array.from(record.addedNodes).includes(wrapped.container));
+    processMutationRecords(records.filter((record) => record !== ownRecord));
+  }
+  if (config.textDiagnostics) logTextDiagnostic('setter translation memory hit', { segmentIds });
+  return true;
+}
 
 function setterMatches(target: Node, type: string, value: string): boolean {
   if (type === 'llm-page-translator:check-text-content' || type === 'llm-page-translator:detached-text') {
-    return originalTextContent(target) === value;
+    return originalTextContent(target) === value || applyCachedText(target, value);
   }
   return target instanceof Element && (matchesOriginalInnerHTML(target, value) ||
     preserveTranslatedInnerHTML(target, value, (element) => {
@@ -697,7 +846,18 @@ function stopObserver(): void {
 // ---------- public actions ----------
 
 async function start(): Promise<void> {
-  cfg = await fetchConfig();
+  const pending = { changes: [] as { key: string; value: unknown }[], invalidated: false };
+  pendingIndex = pending;
+  memoryIndex = null;
+  cachedChunks.clear();
+  try {
+    cfg = await fetchConfig();
+  } catch (error) {
+    if (pendingIndex === pending) pendingIndex = null;
+    throw error;
+  }
+  if (cfg.translateDynamic) await loadMemoryIndex(pending);
+  else if (pendingIndex === pending) pendingIndex = null;
   if (!setterGuardInstalled) await browser.runtime.sendMessage({ type: 'installSetterGuard' });
   if (document.dispatchEvent(new CustomEvent('llm-page-translator:setter-guard-start', {
     cancelable: true,
@@ -715,6 +875,9 @@ async function start(): Promise<void> {
 
 function restore(): void {
   active = false;
+  pendingIndex = null;
+  memoryIndex = null;
+  cachedChunks.clear();
   detachedSetterChecks.clear();
   document.dispatchEvent(new Event('llm-page-translator:setter-guard-stop'));
   stopObserver();
@@ -765,6 +928,9 @@ browser.runtime.onMessage.addListener((raw: unknown) => {
       return Promise.resolve(status());
     case 'retryErrors':
       retryErrors();
+      return Promise.resolve(status());
+    case 'invalidateMemoryIndex':
+      invalidateMemoryIndex();
       return Promise.resolve(status());
     case 'status':
       return Promise.resolve(status());

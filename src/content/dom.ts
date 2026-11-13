@@ -42,6 +42,17 @@ function elementRejectionReason(el: Element): string | undefined {
   return undefined;
 }
 
+export function canTranslateTextAssignment(node: Node, value: string): boolean {
+  if (!document.body?.contains(node) || isOwnNode(node) || !value.trim() || !HAS_LETTER.test(value)) return false;
+  const parent = node.nodeType === Node.ELEMENT_NODE ? node as Element
+    : node.nodeType === Node.TEXT_NODE ? node.parentElement : null;
+  if (!parent) return false;
+  for (let element: Element | null = parent; element && element !== document.body; element = element.parentElement) {
+    if (elementRejectionReason(element)) return false;
+  }
+  return true;
+}
+
 export interface ScannedTextNode {
   node: Text;
   domLevel: number;
@@ -171,14 +182,15 @@ export function createSegSpan(id: number, raw: string): HTMLSpanElement {
   return span;
 }
 
-/** Replace a text node with `span.xt-node > span.xt-seg*` (one per phrase). */
-export function wrapTextNode(text: Text, nextId: () => number, separateNumbers = false): (WrappedSegment | { separator: true })[] {
-  const value = text.nodeValue ?? '';
+export function createWrappedText(value: string, nextId: () => number, separateNumbers = false, whole = false): {
+  container: HTMLSpanElement;
+  segments: (WrappedSegment | { separator: true })[];
+} {
   const container = document.createElement('span');
   container.className = NODE_CLASS;
   originals.set(container, value);
   const segs: (WrappedSegment | { separator: true })[] = [];
-  const parts = separateNumbers
+  const parts = whole ? [{ raw: value, kind: 'text' as const }] : separateNumbers
     ? splitNumberSeparatedPhrases(value)
     : splitPhrases(value).map((raw) => ({ raw, kind: 'text' as const }));
   for (const { raw, kind } of parts) {
@@ -192,8 +204,14 @@ export function wrapTextNode(text: Text, nextId: () => number, separateNumbers =
     container.appendChild(span);
     segs.push({ id, span, raw });
   }
+  return { container, segments: segs };
+}
+
+/** Replace a text node with `span.xt-node > span.xt-seg*` (one per phrase). */
+export function wrapTextNode(text: Text, nextId: () => number, separateNumbers = false): (WrappedSegment | { separator: true })[] {
+  const { container, segments } = createWrappedText(text.nodeValue ?? '', nextId, separateNumbers);
   text.replaceWith(container);
-  return segs;
+  return segments;
 }
 
 /** Restore every wrapped text node to its original content (also removes badges inside wrappers). */

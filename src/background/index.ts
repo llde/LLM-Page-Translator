@@ -17,6 +17,7 @@ import { BudgetError, buildModelsRequest, buildRequest, checkBudget, extractCont
 import {
   clearPageTranslationMemory,
   getTranslationMemory,
+  getTranslationMemoryIndex,
   setTranslationMemory,
   visitTranslationMemory,
   type TranslationMemoryContext,
@@ -35,6 +36,18 @@ const clip = (s: string) => (s.length > MAX_BODY ? s.slice(0, MAX_BODY) + `\n…
 const CORS_HINT =
   'Hint: check that the backend URL is correct and reachable. Ollama rejects requests from browser extensions ' +
   'unless allowed, e.g. start it with OLLAMA_ORIGINS="chrome-extension://*,moz-extension://*".';
+
+browser.storage.onChanged.addListener((changes, area) => {
+  if (area !== 'session') return;
+  for (const key of Object.keys(changes)) {
+    if (!key.startsWith('tab:')) continue;
+    const tabId = Number(key.slice(4));
+    if (!Number.isInteger(tabId) || tabId < 0) continue;
+    browser.tabs.sendMessage(tabId, { type: 'invalidateMemoryIndex' }).catch((error: unknown) => {
+      console.warn('[LLM Page Translator] Could not invalidate the tab memory index', error);
+    });
+  }
+});
 
 async function getFrameUrlAncestry(tabId: number | undefined, frameId: number | undefined): Promise<string[] | undefined> {
   if (tabId === undefined || frameId === undefined) return undefined;
@@ -294,12 +307,21 @@ async function testConnection(settings?: GlobalSettings) {
 browser.runtime.onMessage.addListener((raw: unknown, sender: Runtime.MessageSender) => {
   const msg = raw as RuntimeRequest;
   if (msg?.type === 'getConfig') return getContentConfig(sender);
+  if (msg?.type === 'getTranslationMemoryIndex') return getContentMemoryIndex(sender);
   if (msg?.type === 'installSetterGuard') return installSetterGuard(sender);
   if (msg?.type === 'testConnection') return testConnection(msg.settings);
   if (msg?.type === 'clearPageMemory') return clearPageMemory(msg.pageUrl, msg.tabId);
   if (msg?.type === 'listModels') return listModels(msg.backend);
   return undefined;
 });
+
+async function getContentMemoryIndex(sender: Runtime.MessageSender) {
+  const pageUrl = sender.tab?.url;
+  const ancestry = await getFrameUrlAncestry(sender.tab?.id, sender.frameId);
+  if (!pageUrl || !ancestry) throw new Error('Cannot load translation memory index without page and frame ancestry');
+  const cfg = await getSettings(sender.tab?.id, pageUrl);
+  return getTranslationMemoryIndex({ pageUrl, frameUrlAncestry: ancestry }, cfg);
+}
 
 async function installSetterGuard(sender: Runtime.MessageSender): Promise<void> {
   const tabId = sender.tab?.id;

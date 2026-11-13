@@ -25,6 +25,7 @@ import { DEFAULT_SETTINGS, effectiveConfig } from '../src/shared/settings';
 import {
   clearPageTranslationMemory,
   getTranslationMemory,
+  getTranslationMemoryIndex,
   setTranslationMemory,
   visitTranslationMemory,
   type TranslationMemoryContext,
@@ -55,6 +56,64 @@ afterEach(() => {
 });
 
 describe('translation memory', () => {
+  it('preloads only chunks for the same page, frame ancestry, and translation settings', async () => {
+    const page = 'https://example.com/article';
+    const frame = context(page, 4, 'https://example.com/frame');
+    await setTranslationMemory(context(page), settings, segments, translations);
+    await setTranslationMemory(frame, settings, segments, { 1: 'Frame hello.', 2: 'Frame goodbye.' });
+    await setTranslationMemory(context(page), effectiveConfig(DEFAULT_SETTINGS, { targetLanguage: 'French' }), segments, { 1: 'Bonjour.', 2: 'Au revoir.' });
+    await setTranslationMemory(context('https://example.com/other'), settings, segments, translations);
+
+    const index = await getTranslationMemoryIndex(context(page), settings);
+    expect(Object.values(index.entries)).toEqual([{ texts: ['Hello.', 'Goodbye.'], translations: ['Ciao.', 'Arrivederci.'] }]);
+    const frameIndex = await getTranslationMemoryIndex(frame, settings);
+    expect(Object.values(frameIndex.entries)).toEqual([{ texts: ['Hello.', 'Goodbye.'], translations: ['Frame hello.', 'Frame goodbye.'] }]);
+    await clearPageTranslationMemory(page);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), settings)).entries)).toEqual([]);
+  });
+
+  it('indexes legacy hashed entries when they are read', async () => {
+    const page = 'https://example.com/legacy';
+    await setTranslationMemory(context(page), settings, segments, translations);
+    const [key] = [...fakeStorage.items.keys()];
+    fakeStorage.items.set(key, ['Ciao.', 'Arrivederci.']);
+
+    await expect(getTranslationMemory(context(page), settings, segments)).resolves.toEqual(translations);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), settings)).entries)).toEqual([
+      { texts: ['Hello.', 'Goodbye.'], translations: ['Ciao.', 'Arrivederci.'] },
+    ]);
+  });
+
+  it('does not recreate a legacy entry when page memory is cleared during migration', async () => {
+    const page = 'https://example.com/legacy-clear';
+    await setTranslationMemory(context(page), settings, segments, translations);
+    const [key] = [...fakeStorage.items.keys()];
+    fakeStorage.items.set(key, ['Ciao.', 'Arrivederci.']);
+    let resumeMigration!: () => void;
+    let migrationStarted!: () => void;
+    const started = new Promise<void>((resolve) => { migrationStarted = resolve; });
+    const blocked = new Promise<void>((resolve) => { resumeMigration = resolve; });
+    const originalSet = fakeStorage.local.set;
+    const setter = vi.spyOn(fakeStorage.local, 'set').mockImplementation(async (values) => {
+      migrationStarted();
+      await blocked;
+      await originalSet(values);
+    });
+
+    try {
+      const lookup = getTranslationMemory(context(page), settings, segments);
+      await started;
+      const clearing = clearPageTranslationMemory(page);
+      await Promise.race([clearing, new Promise((resolve) => setTimeout(resolve, 50))]);
+      resumeMigration();
+      await Promise.all([lookup, clearing]);
+      expect(fakeStorage.items.has(key)).toBe(false);
+    } finally {
+      resumeMigration();
+      setter.mockRestore();
+    }
+  });
+
   it('allows identical-URL sibling frames under the same parent to share memory across frame IDs', async () => {
     const page = 'https://example.com/article';
     const frameUrl = 'https://example.com/embed';
