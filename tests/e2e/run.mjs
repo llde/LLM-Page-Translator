@@ -612,6 +612,10 @@ try {
     }
     if (p.startsWith('options')) {
       check((await pg.locator('input[name=memoryRetentionDays]').inputValue()) === '30', 'options show the default 30-day memory retention');
+      const sliceOption = pg.locator('input[name=experimentalSliceGuard]');
+      const hasSliceOption = (await sliceOption.count()) === 1;
+      check(hasSliceOption && !(await sliceOption.isChecked()), 'experimental slice option is available and disabled by default');
+      if (hasSliceOption) await sliceOption.check();
       const opts = await pg.locator('select[name=model] option').allTextContents();
       check(JSON.stringify(opts) === JSON.stringify(['mock', 'other']), `options model list from backend: ${JSON.stringify(opts)}`);
       check((await pg.locator('select[name=model]').inputValue()) === 'mock', 'options shows saved model');
@@ -620,6 +624,12 @@ try {
       await pg.waitForFunction(() => document.querySelector('#msg')?.textContent?.startsWith('Saved'));
       const savedSettings = await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
       check(savedSettings.tabPromptRules?.[0]?.prompt === 'E2E saved URL prompt', 'saving global options preserves URL prompt rules');
+      check(hasSliceOption && savedSettings.experimentalSliceGuard === true, 'options save the experimental slice setting');
+      if (hasSliceOption) {
+        await sliceOption.uncheck();
+        await pg.locator('button[type=submit]').click();
+        await pg.waitForFunction(() => document.querySelector('#msg')?.textContent?.startsWith('Saved'));
+      }
       await pg.locator('#test').click();
       await pg.waitForTimeout(1500);
       check((await pg.locator('#msg').innerText()).includes('OK'), `test connection: ${await pg.locator('#msg').innerText()}`);
@@ -651,6 +661,7 @@ try {
   }, msg);
   await setterPage.waitForTimeout(500);
   await setterTabMsg({ type: 'start' });
+  check(await setterPage.evaluate(() => typeof 'ordinary'.slice(0, 3) === 'string'), 'slice wrapping is disabled by default');
   await setterPage.waitForFunction(() =>
     document.querySelector('#setter-text')?.textContent?.includes('IT:Original setter phrase.') &&
     document.querySelector('#setter-html')?.textContent?.includes('IT:the link') &&
@@ -736,6 +747,115 @@ try {
   });
   check(afterRestore, 'restore returns page setters to normal behavior');
   await setterPage.close();
+
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalSliceGuard: true } });
+  });
+  const slicePage = await ctx.newPage();
+  slicePage.on('pageerror', (e) => errors.push(String(e)));
+  const sliceDiagnostics = [];
+  slicePage.on('console', async (message) => {
+    if (message.text().includes('[LLM Page Translator] mutation observer')) {
+      sliceDiagnostics.push(await message.args()[1].jsonValue());
+    }
+  });
+  await slicePage.goto(`http://127.0.0.1:${PORT}/slice-test`);
+  await slicePage.evaluate(() => {
+    document.body.innerHTML = `
+      <p id="slice-only">Slice target original.</p>
+      <p id="slice-mixed">Mixed target original.</p>
+      <p id="slice-full">Full target original.</p>
+      <iframe id="slice-frame" srcdoc="<p id='slice-frame-target'>Frame target original.</p>"></iframe>
+    `;
+  });
+  await sw.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/slice-test' });
+    await chrome.storage.session.set({ [`tab:${tab.id}`]: { textDiagnostics: true } });
+  });
+  const sliceTabMsg = (msg) => sw.evaluate(async (m) => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/slice-test' });
+    return chrome.tabs.sendMessage(tab.id, m);
+  }, msg);
+  await slicePage.waitForTimeout(500);
+  await sliceTabMsg({ type: 'start' });
+  await slicePage.waitForFunction(() =>
+    document.querySelector('#slice-only')?.textContent?.includes('IT:Slice target original.') &&
+    document.querySelector('#slice-mixed')?.textContent?.includes('IT:Mixed target original.') &&
+    document.querySelector('#slice-full')?.textContent?.includes('IT:Full target original.'),
+    null,
+    { timeout: 10000 },
+  );
+  const sliceFrame = slicePage.frameLocator('#slice-frame').locator('#slice-frame-target');
+  await sliceFrame.waitFor();
+  await slicePage.waitForTimeout(1500);
+  const requestStart = requests.length;
+  const sliceStart = sliceDiagnostics.length;
+  const sliceChecks = await slicePage.evaluate(() => {
+    const partial = 'Unique sliced source'.slice(0, 6);
+    const full = 'Whole changed phrase.'.slice();
+    const equalPartial = 'Unique suffix'.slice(0, 6);
+    const framePartial = document.querySelector('#slice-frame').contentWindow.String.prototype.slice.call('Unique iframe source', 0, 6);
+    const noConstructor = { constructor: null, toString: () => 'ordinary object' };
+    const detached = document.createElement('p');
+    detached.textContent = null;
+    const nullText = detached.textContent === '';
+    detached.textContent = undefined;
+    const undefinedText = detached.textContent === '';
+    detached.textContent = noConstructor;
+    const result = {
+      partialWrapped: !(partial instanceof String) && partial.constructor?.name === full.constructor?.name && partial.isSubstring === true && partial.value === 'Unique',
+      fullWrapped: !(full instanceof String) && full.isSubstring === false,
+      equality: typeof partial.equals === 'function' && partial.equals('Unique') && partial.equals(equalPartial) && partial.equals(framePartial) &&
+        !partial.equals(null) && !partial.equals(undefined) && !partial.equals(noConstructor) &&
+        partial == 'Unique' && String(partial) === 'Unique',
+      nullSafe: nullText && undefinedText && detached.textContent === 'ordinary object',
+    };
+    document.querySelector('#slice-only').textContent = framePartial;
+    document.querySelector('#slice-mixed').textContent = 'Discarded mixed source'.slice(0, 9);
+    document.querySelector('#slice-mixed').textContent = 'Genuine mixed update.';
+    document.querySelector('#slice-full').textContent = full;
+    const direct = document.createElement('p');
+    direct.id = 'slice-direct';
+    direct.appendChild(document.createTextNode('Initial direct text.'));
+    document.body.appendChild(direct);
+    direct.firstChild.textContent = 'Direct substring source'.slice(0, 6);
+    result.primitiveText = typeof document.querySelector('#slice-only').textContent === 'string';
+    return result;
+  });
+  const frameWrapped = await sliceFrame.evaluate((element) => {
+    const partial = 'Frame slice source'.slice(0, 5);
+    element.textContent = partial;
+    return partial.constructor?.name === 'Frame'.slice().constructor?.name && partial.isSubstring === true;
+  });
+  await slicePage.waitForTimeout(3500);
+  check(sliceChecks.partialWrapped && sliceChecks.fullWrapped && sliceChecks.equality, 'experimental slice returns comparable wrappers with substring metadata');
+  check(sliceChecks.nullSafe, 'slice detection accepts null, undefined, and objects without constructors');
+  check(sliceChecks.primitiveText && (await slicePage.locator('#slice-only').textContent()) === 'Unique', 'substring assignment stores primitive text without retranslating');
+  check(
+    (await slicePage.locator('#slice-mixed').textContent()).includes('IT:Genuine mixed update.'),
+    'a later ordinary mutation on the same node is translated',
+  );
+  check((await slicePage.locator('#slice-full').textContent()).includes('IT:Whole changed phrase.'), 'a full slice mutation is translated normally');
+  check((await slicePage.locator('#slice-direct').textContent()) === 'Direct', 'direct text-node substring assignment survives unrelated scans');
+  check(frameWrapped && (await sliceFrame.textContent()) === 'Frame', 'iframe substring mutation is ignored independently');
+  check(
+    !requests.slice(requestStart).some((request) => request.messages[1].content.includes('Unique') || request.messages[1].content.includes('Frame') || request.messages[1].content.includes('Direct')),
+    'ignored slice mutations do not reach the provider',
+  );
+  check(
+    sliceDiagnostics.slice(sliceStart).some((summary) =>
+      summary.mutations?.some((mutation) => mutation.sliceWrapper === true && mutation.isSubstring === true)),
+    'observer diagnostics identify substring wrapper assignments',
+  );
+  await slicePage.locator('#slice-direct').evaluate((element) => {
+    element.firstChild.textContent = 'Genuine direct update.';
+  });
+  await slicePage.waitForTimeout(2000);
+  check((await slicePage.locator('#slice-direct').textContent()).includes('IT:Genuine direct update.'), 'a later ordinary text-node mutation is translated');
+  await sliceTabMsg({ type: 'restore' });
+  check(await slicePage.evaluate(() => typeof 'ordinary'.slice(0, 3) === 'string'), 'restore removes experimental slice wrapping');
+  await slicePage.close();
   check(errors.length === 0, `no page errors ${errors.join(' ')}`);
 } finally {
   await ctx.close();

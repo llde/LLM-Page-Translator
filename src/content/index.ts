@@ -62,6 +62,7 @@ let keepalive: ReturnType<typeof setInterval> | null = null;
 let observer: MutationObserver | null = null;
 let debounce: ReturnType<typeof setTimeout> | null = null;
 let setterGuardInstalled = false;
+let ignoredSliceText = new WeakMap<Text, string>();
 
 function setterMatches(target: Node, type: string, value: string): boolean {
   if (type === 'llm-page-translator:check-text-content' || type === 'llm-page-translator:detached-text') {
@@ -499,6 +500,10 @@ function scan(): void {
   });
   for (const item of items) {
     if (item.kind === 'text') {
+      if (ignoredSliceText.get(item.node) === item.node.data) {
+        if (diagnostics) logTextDiagnostic('scan ignored substring', { preview: diagnosticTextPreview(item.node.data) });
+        continue;
+      }
       for (const w of wrapTextNode(item.node, () => nextSegId++)) {
         segs.set(w.id, { id: w.id, element: w.span, raw: w.raw, domLevel: item.domLevel });
         payload.push({ id: w.id, text: w.raw, domLevel: item.domLevel });
@@ -531,37 +536,89 @@ function isRelevantMutation(m: MutationRecord): boolean {
   return Array.from(m.addedNodes).some((n) => !isOwnNode(n) && (n.nodeType === Node.TEXT_NODE || n.nodeType === Node.ELEMENT_NODE));
 }
 
+const pendingSliceMutations = new Map<number, { target: Node; matched: boolean }>();
+
+function processMutationRecords(records: MutationRecord[]): void {
+  if (!records.length) return;
+  const suppressed = new Set<MutationRecord>();
+  for (const record of records) {
+    const pending = [...pendingSliceMutations.values()].reverse().find((entry) =>
+      !entry.matched &&
+      entry.target === record.target &&
+      record.type === (entry.target.nodeType === Node.TEXT_NODE || entry.target.nodeType === Node.CDATA_SECTION_NODE
+        ? 'characterData'
+        : 'childList'),
+    );
+    if (pending) {
+      pending.matched = true;
+      suppressed.add(record);
+      if (record.type === 'characterData' && record.target instanceof Text) {
+        ignoredSliceText.set(record.target, record.target.data);
+      } else {
+        for (const node of record.addedNodes) {
+          if (node instanceof Text) ignoredSliceText.set(node, node.data);
+        }
+      }
+    } else if (record.type === 'characterData' && record.target instanceof Text) {
+      ignoredSliceText.delete(record.target);
+    }
+  }
+  const analysis = analyzeMutationBatch(
+    records,
+    (record) => !suppressed.has(record) && isRelevantMutation(record),
+    !!cfg?.textDiagnostics,
+  );
+  const debounceAction = analysis.hasRelevantRecords
+    ? debounce ? 'restarted' : 'scheduled'
+    : 'unchanged';
+  if (analysis.relevantRecords) {
+    logTextDiagnostic('mutation observer', {
+      recordCount: records.length,
+      relevantRecordCount: analysis.relevantRecords.length,
+      ignoredRecordCount: records.length - analysis.relevantRecords.length,
+      childListRecords: records.filter((record) => record.type === 'childList').length,
+      characterDataRecords: records.filter((record) => record.type === 'characterData').length,
+      debounceAction,
+      mutations: records.map((record) => ({
+        ...diagnosticMutation(record),
+        ...(suppressed.has(record) ? { sliceWrapper: true, isSubstring: true } : {}),
+      })),
+    });
+  }
+  if (!analysis.hasRelevantRecords) return;
+  if (debounce) clearTimeout(debounce);
+  debounce = setTimeout(() => {
+    debounce = null;
+    scan();
+  }, MUTATION_DEBOUNCE_MS);
+}
+
+document.addEventListener('llm-page-translator:slice-before', (event) => {
+  if (!active || !cfg?.experimentalSliceGuard || !observer || !(event instanceof CustomEvent) || typeof event.detail !== 'string') return;
+  const id = Number(event.detail);
+  if (!Number.isInteger(id) || id < 1 || !(event.target instanceof Node)) return;
+  processMutationRecords(observer.takeRecords());
+  pendingSliceMutations.set(id, { target: event.target, matched: false });
+}, true);
+document.addEventListener('llm-page-translator:slice-after', (event) => {
+  if (!(event instanceof CustomEvent) || typeof event.detail !== 'string') return;
+  const id = Number(event.detail);
+  if (!pendingSliceMutations.has(id)) return;
+  if (observer) processMutationRecords(observer.takeRecords());
+  pendingSliceMutations.delete(id);
+}, true);
+
 function startObserver(): void {
   if (observer || !document.body) return;
-  observer = new MutationObserver((records) => {
-    const analysis = analyzeMutationBatch(records, isRelevantMutation, !!cfg?.textDiagnostics);
-    const debounceAction = analysis.hasRelevantRecords
-      ? debounce ? 'restarted' : 'scheduled'
-      : 'unchanged';
-    if (analysis.relevantRecords) {
-      logTextDiagnostic('mutation observer', {
-        recordCount: records.length,
-        relevantRecordCount: analysis.relevantRecords.length,
-        ignoredRecordCount: records.length - analysis.relevantRecords.length,
-        childListRecords: records.filter((record) => record.type === 'childList').length,
-        characterDataRecords: records.filter((record) => record.type === 'characterData').length,
-        debounceAction,
-        mutations: records.map(diagnosticMutation),
-      });
-    }
-    if (!analysis.hasRelevantRecords) return;
-    if (debounce) clearTimeout(debounce);
-    debounce = setTimeout(() => {
-      debounce = null;
-      scan();
-    }, MUTATION_DEBOUNCE_MS);
-  });
+  observer = new MutationObserver(processMutationRecords);
   observer.observe(document.body, { childList: true, subtree: true, characterData: true });
 }
 
 function stopObserver(): void {
   observer?.disconnect();
   observer = null;
+  pendingSliceMutations.clear();
+  ignoredSliceText = new WeakMap<Text, string>();
   if (debounce) clearTimeout(debounce);
   debounce = null;
 }
@@ -571,7 +628,10 @@ function stopObserver(): void {
 async function start(): Promise<void> {
   cfg = await fetchConfig();
   if (!setterGuardInstalled) await browser.runtime.sendMessage({ type: 'installSetterGuard' });
-  if (document.dispatchEvent(new Event('llm-page-translator:setter-guard-start', { cancelable: true }))) {
+  if (document.dispatchEvent(new CustomEvent('llm-page-translator:setter-guard-start', {
+    cancelable: true,
+    detail: cfg.experimentalSliceGuard ? 'slice' : '',
+  }))) {
     throw new Error('Could not activate the page setter guard');
   }
   setterGuardInstalled = true;

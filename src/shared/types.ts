@@ -17,6 +17,7 @@ export interface GlobalSettings {
   targetLanguage: string;
   autoTranslateSites: string[];
   translateDynamic: boolean;
+  experimentalSliceGuard: boolean;
   memoryRetentionDays: number;
 }
 
@@ -73,6 +74,7 @@ export interface ContentConfig {
   maxChunkSize: number;
   concurrency: number;
   translateDynamic: boolean;
+  experimentalSliceGuard: boolean;
   autoTranslate: boolean;
   textDiagnostics: boolean;
 }

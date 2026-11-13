@@ -23,6 +23,7 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   targetLanguage: 'English',
   autoTranslateSites: [],
   translateDynamic: true,
+  experimentalSliceGuard: false,
   memoryRetentionDays: 30,
 };
 

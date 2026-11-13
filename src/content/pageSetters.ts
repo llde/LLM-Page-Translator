@@ -6,6 +6,73 @@ const DETACHED_TEXT = 'llm-page-translator:detached-text';
 const DETACHED_HTML = 'llm-page-translator:detached-html';
 const DETACHED_TARGET = 'llm-page-translator:detached-target';
 const DETACHED_CLEANUP = 'llm-page-translator:detached-cleanup';
+const SLICE_BEFORE = 'llm-page-translator:slice-before';
+const SLICE_AFTER = 'llm-page-translator:slice-after';
+
+let nativeSlice: typeof String.prototype.slice = String.prototype.slice;
+let sliceDescriptor: PropertyDescriptor | undefined;
+
+class SliceString {
+  readonly #value: string;
+  readonly #isSubstring: boolean;
+
+  constructor(value: string, isSubstring: boolean) {
+    this.#value = value;
+    this.#isSubstring = isSubstring;
+  }
+
+  get value(): string {
+    return this.#value;
+  }
+
+  get isSubstring(): boolean {
+    return this.#isSubstring;
+  }
+
+  toString(): string {
+    return this.#value;
+  }
+
+  valueOf(): string {
+    return this.#value;
+  }
+
+  equals(other: unknown): boolean {
+    const otherValue = typeof other === 'string'
+      ? other
+      : isSliceString(other) ? other.value : undefined;
+    return this.#value === otherValue;
+  }
+}
+
+function isSliceString(value: unknown): value is SliceString {
+  return typeof value === 'object' && value !== null &&
+    value.constructor?.name === SliceString.name &&
+    'value' in value && typeof value.value === 'string' &&
+    'isSubstring' in value && typeof value.isSubstring === 'boolean';
+}
+
+function experimentalSlice(this: unknown, start?: number, end?: number): SliceString {
+  'use strict';
+  if (this === null || this === undefined) throw new TypeError('String.prototype.slice called on null or undefined');
+  const source = `${this}`;
+  const value = nativeSlice.call(source, start, end);
+  return new SliceString(value, value !== source);
+}
+
+function configureSlice(enabled: boolean): void {
+  const current = Object.getOwnPropertyDescriptor(String.prototype, 'slice');
+  if (enabled) {
+    if (current?.value === experimentalSlice) return;
+    if (!current || typeof current.value !== 'function') throw new Error('Cannot guard String.prototype.slice');
+    nativeSlice = current.value;
+    sliceDescriptor = current;
+    Object.defineProperty(String.prototype, 'slice', { ...current, value: experimentalSlice });
+  } else {
+    if (current?.value === experimentalSlice && sliceDescriptor) Object.defineProperty(String.prototype, 'slice', sliceDescriptor);
+    sliceDescriptor = undefined;
+  }
+}
 
 let nextRequestId = 0;
 
@@ -32,6 +99,19 @@ function guardSetter(prototype: object, property: string, eventType: string): vo
   Object.defineProperty(prototype, property, {
     ...descriptor,
     set(this: Node, value: unknown) {
+      const slice = isSliceString(value) ? value : undefined;
+      if (slice) value = slice.value;
+      if (state.active && state.experimentalSliceGuard && slice?.isSubstring && eventType === CHECK_TEXT) {
+        nextRequestId = nextRequestId >= 0x7fffffff ? 1 : nextRequestId + 1;
+        const requestId = nextRequestId;
+        if (this.isConnected) this.dispatchEvent(new CustomEvent(SLICE_BEFORE, { bubbles: true, detail: `${requestId}` }));
+        try {
+          nativeSet.call(this, value);
+        } finally {
+          document.dispatchEvent(new CustomEvent(SLICE_AFTER, { detail: `${requestId}` }));
+        }
+        return;
+      }
       if (state.active) {
         const comparable = typeof value === 'string' ? value
           : value === null || (value === undefined && eventType === CHECK_TEXT) ? ''
@@ -51,14 +131,20 @@ function guardSetter(prototype: object, property: string, eventType: string): vo
 }
 
 const key = Symbol.for('llm-page-translator:setter-guard');
-const state = { active: false };
+const state = { active: false, experimentalSliceGuard: false };
 if (!Reflect.has(window, key)) {
   guardSetter(Node.prototype, 'textContent', CHECK_TEXT);
   guardSetter(Element.prototype, 'innerHTML', CHECK_HTML);
   document.addEventListener(START, (event) => {
+    state.experimentalSliceGuard = event instanceof CustomEvent && event.detail === 'slice';
+    configureSlice(state.experimentalSliceGuard);
     state.active = true;
     event.preventDefault();
   });
-  document.addEventListener(STOP, () => { state.active = false; });
+  document.addEventListener(STOP, () => {
+    state.active = false;
+    state.experimentalSliceGuard = false;
+    configureSlice(false);
+  });
   Object.defineProperty(window, key, { value: true });
 }
