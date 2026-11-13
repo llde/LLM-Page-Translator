@@ -53,52 +53,72 @@ export interface ScannedInput {
 }
 
 /** Collect visible, translatable text nodes under root with their depth, in document order. */
-export function scanTextNodes(root: Element, diagnostics = false, separateNumbers = false): ScannedTextNode[] {
+export function scanTextNodes(root: Element | Text, diagnostics = false, separateNumbers = false): ScannedTextNode[] {
   const out: ScannedTextNode[] = [];
-  const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
-    acceptNode(node) {
-      if (node.nodeType === Node.ELEMENT_NODE) {
-        const el = node as Element;
-        const reason = elementRejectionReason(el);
-        if (reason) {
-          if (diagnostics) logTextDiagnostic('scan rejected subtree', { path: diagnosticElementPath(el), reason });
-          return NodeFilter.FILTER_REJECT;
-        }
-        return NodeFilter.FILTER_SKIP;
-      }
-      const t = node.nodeValue ?? '';
-      const parent = (node as Text).parentElement;
-      const path = parent ? diagnosticElementPath(parent) : '';
-      if (!t.trim()) {
-        if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'empty or whitespace only' });
+  const rootElement = root.nodeType === Node.ELEMENT_NODE ? root as Element : root.parentElement;
+  for (let element = rootElement; element && element !== document.body; element = element.parentElement) {
+    const reason = elementRejectionReason(element);
+    if (reason) {
+      if (diagnostics) logTextDiagnostic('scan rejected subtree', { path: diagnosticElementPath(element), reason });
+      return out;
+    }
+  }
+  const acceptNode = (node: Node): number => {
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const el = node as Element;
+      const reason = elementRejectionReason(el);
+      if (reason) {
+        if (diagnostics) logTextDiagnostic('scan rejected subtree', { path: diagnosticElementPath(el), reason });
         return NodeFilter.FILTER_REJECT;
       }
-      if (!HAS_LETTER.test(t) && !(separateNumbers && HAS_NUMBER.test(t))) {
-        if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'contains no letters', preview: diagnosticTextPreview(t) });
-        return NodeFilter.FILTER_REJECT;
-      }
-      if (diagnostics) {
-        logTextDiagnostic('scan accepted text', { path, preview: diagnosticTextPreview(t) });
-      }
-      return NodeFilter.FILTER_ACCEPT;
-    },
-  });
-  if (diagnostics) logTextDiagnostic('scan started', { root: diagnosticElementPath(root) });
-  for (let n = walker.nextNode(); n; n = walker.nextNode()) {
-    const node = n as Text;
+      return NodeFilter.FILTER_SKIP;
+    }
+    const t = node.nodeValue ?? '';
+    const parent = (node as Text).parentElement;
+    const path = parent ? diagnosticElementPath(parent) : '';
+    if (!t.trim()) {
+      if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'empty or whitespace only' });
+      return NodeFilter.FILTER_REJECT;
+    }
+    if (!HAS_LETTER.test(t) && !(separateNumbers && HAS_NUMBER.test(t))) {
+      if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'contains no letters', preview: diagnosticTextPreview(t) });
+      return NodeFilter.FILTER_REJECT;
+    }
+    if (diagnostics) {
+      logTextDiagnostic('scan accepted text', { path, preview: diagnosticTextPreview(t) });
+    }
+    return NodeFilter.FILTER_ACCEPT;
+  };
+  const addNode = (node: Text) => {
     let domLevel = 0;
-    for (let parent = node.parentElement; parent && parent !== root; parent = parent.parentElement) domLevel++;
+    for (let parent = node.parentElement; parent && parent !== document.body; parent = parent.parentElement) domLevel++;
     out.push({ node, domLevel });
+  };
+  if (diagnostics) {
+    const path = rootElement ? diagnosticElementPath(rootElement) : '';
+    logTextDiagnostic('scan started', { root: root.nodeType === Node.ELEMENT_NODE ? path : `${path} > #text` });
+  }
+  if (root.nodeType === Node.TEXT_NODE || root.nodeType === Node.CDATA_SECTION_NODE) {
+    if (acceptNode(root) === NodeFilter.FILTER_ACCEPT) addNode(root as Text);
+  } else {
+    const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, { acceptNode });
+    for (let node = walker.nextNode(); node; node = walker.nextNode()) addNode(node as Text);
   }
   if (diagnostics) logTextDiagnostic('scan completed', { acceptedTextNodes: out.length });
   return out;
 }
 
 /** Collect visible, unnamed text-entry inputs in forms when they have an explicit value. */
-export function scanFormInputs(root: Element, diagnostics = false, separateNumbers = false): ScannedInput[] {
+export function scanFormInputs(root: Element | Text, diagnostics = false, separateNumbers = false): ScannedInput[] {
   const out: ScannedInput[] = [];
-  if (diagnostics) logTextDiagnostic('input scan started', { root: diagnosticElementPath(root) });
-  for (const input of root.querySelectorAll<HTMLInputElement>('input')) {
+  if (root.nodeType !== Node.ELEMENT_NODE) return out;
+  const elementRoot = root as Element;
+  if (diagnostics) logTextDiagnostic('input scan started', { root: diagnosticElementPath(elementRoot) });
+  const inputs = [
+    ...(elementRoot.tagName === 'INPUT' ? [elementRoot as HTMLInputElement] : []),
+    ...elementRoot.querySelectorAll<HTMLInputElement>('input'),
+  ];
+  for (const input of inputs) {
     let reason: string | undefined;
     if (!TRANSLATABLE_INPUT_TYPES.has(input.type)) reason = 'excluded input type';
     else if (!input.closest('form')) reason = 'not inside a form';
@@ -122,7 +142,7 @@ export function scanFormInputs(root: Element, diagnostics = false, separateNumbe
     }
 
     let domLevel = 0;
-    for (let element: Element | null = input; element && element !== root; element = element.parentElement) domLevel++;
+    for (let element: Element | null = input; element && element !== document.body; element = element.parentElement) domLevel++;
     out.push({ input, domLevel });
     if (diagnostics) {
       logTextDiagnostic('input scan accepted', {

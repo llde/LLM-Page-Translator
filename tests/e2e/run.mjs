@@ -66,7 +66,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     return res.end(req.url === '/iframe-test' ? FRAME_PAGE
-      : req.url === '/numbers-test' ? '<!doctype html><html><body></body></html>'
+      : req.url === '/numbers-test' || req.url === '/mutation-target-test' ? '<!doctype html><html><body></body></html>'
         : PAGE);
   }
   let body = '';
@@ -757,6 +757,98 @@ try {
   });
   check(afterRestore, 'restore returns page setters to normal behavior');
   await setterPage.close();
+
+  const mutationPage = await ctx.newPage();
+  mutationPage.on('pageerror', (e) => errors.push(String(e)));
+  const mutationScanRoots = [];
+  mutationPage.on('console', async (message) => {
+    if (message.text().includes('[LLM Page Translator] scan started')) {
+      mutationScanRoots.push((await message.args()[1].jsonValue()).root);
+    }
+  });
+  await mutationPage.goto(`http://127.0.0.1:${PORT}/mutation-target-test`);
+  await mutationPage.evaluate(() => {
+    document.body.innerHTML = `
+      <p id="previously-hidden" style="display:none">Previously hidden unrelated phrase.</p>
+      <p id="changed-first"></p><p id="changed-second"></p>
+      <div id="excluded-parent" translate="no"></div>
+      <div id="hidden-parent" style="display:none"></div>
+      <pre id="excluded-tag"></pre>
+      <form id="dynamic-form"></form>
+      <div id="move-from"></div><div id="move-to"></div>
+    `;
+    document.querySelector('#changed-first').appendChild(document.createTextNode(''));
+    document.querySelector('#changed-second').appendChild(document.createTextNode(''));
+  });
+  const mutationTabMsg = (msg) => sw.evaluate(async (m) => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/mutation-target-test' });
+    return chrome.tabs.sendMessage(tab.id, m, { frameId: 0 });
+  }, msg);
+  await sw.evaluate(async () => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/mutation-target-test' });
+    await chrome.storage.session.set({ [`tab:${tab.id}`]: { textDiagnostics: true } });
+  });
+  await mutationPage.waitForTimeout(500);
+  await mutationTabMsg({ type: 'start' });
+  await mutationPage.waitForTimeout(100);
+  mutationScanRoots.length = 0;
+  const mutationRequestStart = requests.length;
+  await mutationPage.evaluate(() => {
+    document.querySelector('#previously-hidden').style.display = '';
+    document.querySelector('#changed-first').firstChild.data = 'First changed text.';
+    const added = document.createElement('section');
+    added.id = 'added-subtree';
+    document.body.appendChild(added);
+    const nested = document.createElement('p');
+    nested.textContent = 'Nested added text.';
+    added.appendChild(nested);
+    const input = document.createElement('input');
+    input.id = 'dynamic-input';
+    input.setAttribute('value', 'Direct added input.');
+    document.querySelector('#dynamic-form').appendChild(input);
+    document.querySelector('#excluded-parent').textContent = 'Excluded ancestor text.';
+    document.querySelector('#hidden-parent').textContent = 'Hidden ancestor text.';
+    document.querySelector('#excluded-tag').textContent = 'Excluded tag text.';
+    const detached = document.createElement('p');
+    detached.textContent = 'Detached before debounce.';
+    document.body.appendChild(detached);
+    detached.remove();
+    const moved = document.createElement('p');
+    moved.id = 'moved-target';
+    moved.textContent = 'Moved target text.';
+    document.querySelector('#move-from').appendChild(moved);
+    document.body.appendChild(document.createTextNode('Direct body text.'));
+  });
+  await mutationPage.waitForTimeout(150);
+  await mutationPage.evaluate(() => {
+    document.querySelector('#changed-second').firstChild.data = 'Second changed text.';
+    document.querySelector('#move-to').appendChild(document.querySelector('#moved-target'));
+  });
+  await mutationPage.waitForFunction(() =>
+    document.querySelector('#changed-first')?.textContent?.includes('IT:First changed text.') &&
+    document.querySelector('#changed-second')?.textContent?.includes('IT:Second changed text.') &&
+    document.querySelector('#added-subtree')?.textContent?.includes('IT:Nested added text.') &&
+    document.querySelector('#move-to #moved-target')?.textContent?.includes('IT:Moved target text.') &&
+    document.body.textContent?.includes('IT:Direct body text.') &&
+    document.querySelector('#dynamic-input')?.value?.includes('IT:Direct added input.'),
+    null, { timeout: 15000 });
+  check((await mutationPage.locator('#previously-hidden').textContent()) === 'Previously hidden unrelated phrase.',
+    'mutation processing does not scan unrelated newly visible text');
+  const mutationRequests = requests.slice(mutationRequestStart).map((request) => request.messages[1].content);
+  check(!mutationRequests.some((request) => request.includes('Previously hidden unrelated phrase.')),
+    'unrelated newly visible text is not sent to the provider');
+  check(!mutationRequests.some((request) =>
+    ['Excluded ancestor text.', 'Hidden ancestor text.', 'Excluded tag text.', 'Detached before debounce.'].some((text) => request.includes(text))),
+    'targeted scans skip excluded, hidden, and detached nodes');
+  check(mutationRequests.filter((request) => request.includes('Nested added text.')).length === 1,
+    'overlapping added subtrees are translated only once');
+  check(mutationRequests.filter((request) => request.includes('Moved target text.')).length === 1,
+    'nodes moved during the debounce are translated once in their final location');
+  check(mutationScanRoots.some((root) => root.includes('#added-subtree')) &&
+    !mutationScanRoots.some((root) => root === 'html > body'),
+    'observer-triggered scans do not traverse the whole document');
+  await mutationTabMsg({ type: 'restore' });
+  await mutationPage.close();
 
   await sw.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');

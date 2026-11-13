@@ -485,7 +485,7 @@ function addChunks(payload: SegmentPayload[]): void {
 
 // ---------- scanning ----------
 
-function scan(): void {
+function scan(roots?: readonly (Element | Text)[]): void {
   if (!active || !document.body) return;
   const diagnostics = cfg?.textDiagnostics ?? false;
   const separateNumbers = cfg?.separateNumbers ?? false;
@@ -493,16 +493,19 @@ function scan(): void {
   const flush = () => {
     if (payload.length) addChunks(payload.splice(0));
   };
-  const items = [
-    ...scanTextNodes(document.body, diagnostics, separateNumbers).map(({ node, domLevel }) => ({ kind: 'text' as const, node, domLevel })),
-    ...scanFormInputs(document.body, diagnostics, separateNumbers).map(({ input, domLevel }) => ({ kind: 'input' as const, node: input, domLevel })),
-  ].sort((a, b) => {
+  const items = (roots ?? [document.body]).flatMap((root) => [
+    ...scanTextNodes(root, diagnostics, separateNumbers).map(({ node, domLevel }) => ({ kind: 'text' as const, node, domLevel, root })),
+    ...scanFormInputs(root, diagnostics, separateNumbers).map(({ input, domLevel }) => ({ kind: 'input' as const, node: input, domLevel, root })),
+  ]).sort((a, b) => {
     const position = a.node.compareDocumentPosition(b.node);
     if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
     if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
     return 0;
   });
+  let previousRoot: Element | Text | undefined;
   for (const item of items) {
+    if (separateNumbers && previousRoot && previousRoot !== item.root) flush();
+    previousRoot = item.root;
     if (item.kind === 'text') {
       if (ignoredSliceText.get(item.node) === item.node.data) {
         if (separateNumbers && /\p{N}/u.test(item.node.data)) flush();
@@ -556,11 +559,39 @@ function scan(): void {
 
 function isRelevantMutation(m: MutationRecord): boolean {
   if (isOwnNode(m.target)) return false;
-  if (m.type === 'characterData') return true;
+  if (m.type === 'characterData') return m.target.nodeType === Node.TEXT_NODE || m.target.nodeType === Node.CDATA_SECTION_NODE;
   return Array.from(m.addedNodes).some((n) => !isOwnNode(n) && (n.nodeType === Node.TEXT_NODE || n.nodeType === Node.ELEMENT_NODE));
 }
 
 const pendingSliceMutations = new Map<number, { target: Node; matched: boolean }>();
+const pendingMutationRoots = new Set<Node>();
+
+function isScanRoot(node: Node): node is Element | Text {
+  return node.nodeType === Node.ELEMENT_NODE || node.nodeType === Node.TEXT_NODE || node.nodeType === Node.CDATA_SECTION_NODE;
+}
+
+function scanPendingMutations(): void {
+  if (!document.body) {
+    pendingMutationRoots.clear();
+    return;
+  }
+  const candidates = [...pendingMutationRoots].filter((node): node is Element | Text =>
+    isScanRoot(node) && document.body.contains(node) && !isOwnNode(node));
+  pendingMutationRoots.clear();
+  const candidateSet = new Set<Node>(candidates);
+  const roots = candidates.filter((node) => {
+    for (let parent = node.parentNode; parent && parent !== document.body; parent = parent.parentNode) {
+      if (candidateSet.has(parent)) return false;
+    }
+    return true;
+  }).sort((a, b) => {
+    const position = a.compareDocumentPosition(b);
+    if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
+    if (position & Node.DOCUMENT_POSITION_PRECEDING) return 1;
+    return 0;
+  });
+  if (roots.length) scan(roots);
+}
 
 function processMutationRecords(records: MutationRecord[]): void {
   if (!records.length) return;
@@ -610,10 +641,20 @@ function processMutationRecords(records: MutationRecord[]): void {
     });
   }
   if (!analysis.hasRelevantRecords) return;
+  for (const record of records) {
+    if (suppressed.has(record) || !isRelevantMutation(record)) continue;
+    if (record.type === 'characterData') {
+      pendingMutationRoots.add(record.target);
+    } else {
+      for (const node of record.addedNodes) {
+        if (isScanRoot(node) && !isOwnNode(node)) pendingMutationRoots.add(node);
+      }
+    }
+  }
   if (debounce) clearTimeout(debounce);
   debounce = setTimeout(() => {
     debounce = null;
-    scan();
+    scanPendingMutations();
   }, MUTATION_DEBOUNCE_MS);
 }
 
@@ -642,6 +683,7 @@ function stopObserver(): void {
   observer?.disconnect();
   observer = null;
   pendingSliceMutations.clear();
+  pendingMutationRoots.clear();
   ignoredSliceText = new WeakMap<Text, string>();
   if (debounce) clearTimeout(debounce);
   debounce = null;

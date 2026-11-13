@@ -14,7 +14,7 @@ LLM served by **Ollama**, **OpenWebUI** or any **OpenAI-compatible** API.
   missing spaces after punctuation according to target-language conventions.
 - A phrase longer than the max chunk size is not sent: an orange overlay lets you **Send as one chunk**
   (raises the limit for that chunk only) or **Split** it (at `, ; :`, then at words).
-- Text added to the page later (infinite scroll, SPA updates) is translated too (can be disabled).
+- Text added or changed later (infinite scroll, SPA updates) is translated too (can be disabled); only affected nodes and added subtrees are rescanned.
 - The optional **Keep numbers unchanged and use them as chunk separators** setting avoids sending numbers for translation and lets surrounding text reuse memory when numbers change. It also splits numbers inside words and may reduce translation context.
 - While translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. Different text or markup is applied normally.
 - The optional **Experimental: ignore textContent updates from string slices** setting applies sliced text but excludes its mutation from dynamic translation. It changes `String.prototype.slice()` to return objects while translating and can break page scripts, including string method calls, strict equality and empty-string checks. Wrapper detection uses constructor names, so similarly named page objects can be mistaken for wrappers. It is disabled by default.
