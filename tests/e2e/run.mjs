@@ -173,8 +173,13 @@ try {
   const observerProbe = await page.evaluateHandle(() => {
     const node = document.createElement('div');
     node.id = 'observer-probe';
+    node.append(document.createTextNode('Original observer text'));
     document.body.append(node);
     return node;
+  });
+  await page.waitForTimeout(100);
+  await observerProbe.evaluate((node) => {
+    node.firstChild.data = 'Changed observer text';
   });
   await page.waitForTimeout(100);
   await page.evaluate(() => {
@@ -200,25 +205,25 @@ try {
     ),
     'observer diagnostics report ignored-only callbacks without changing the debounce',
   );
+  const mutations = observerDetails.flatMap((summary) => summary.mutations ?? []);
   check(
-    observerLogs.length > 0 &&
-      observerDetails.length > 0 &&
-      observerDetails.every((summary) => {
-        const detail = JSON.stringify(summary);
-        const allowedKeys = [
-          'recordCount',
-          'relevantRecordCount',
-          'ignoredRecordCount',
-          'childListRecords',
-          'characterDataRecords',
-          'debounceAction',
-        ];
-        return Object.keys(summary).every((key) => allowedKeys.includes(key)) &&
-          !detail.includes('http') &&
-          !detail.includes('The first sentence is here.') &&
-          !detail.includes('observer-probe');
-      }),
-    'observer diagnostics omit URLs, text, and DOM node details',
+    observerLogs.length > 0 && mutations.some((mutation) =>
+      mutation.type === 'childList' &&
+      mutation.addedNodes.some((node) => node.path.includes('div#observer-probe'))),
+    'observer diagnostics identify added nodes',
+  );
+  check(
+    mutations.some((mutation) =>
+      mutation.type === 'characterData' &&
+      mutation.target.path.includes('div#observer-probe') &&
+      mutation.target.preview === 'Changed observer text'),
+    'observer diagnostics identify changed text nodes',
+  );
+  check(
+    mutations.some((mutation) =>
+      mutation.type === 'childList' &&
+      mutation.removedNodes.some((node) => node.path.includes('div#observer-probe'))),
+    'observer diagnostics identify removed nodes, including ignored-only removals',
   );
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend request received')), 'enabled diagnostics log backend request receipt');
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend translation completed')), 'enabled diagnostics log backend translation completion');
@@ -627,6 +632,110 @@ try {
     }
     await pg.close();
   }
+  const setterPage = await ctx.newPage();
+  setterPage.on('pageerror', (e) => errors.push(String(e)));
+  await setterPage.goto(`http://127.0.0.1:${PORT}/setter-test`);
+  await setterPage.evaluate(() => {
+    document.body.innerHTML = `
+      <p id="setter-text">Original setter phrase.</p>
+      <p id="setter-html">Read <a href="/target">the link</a> now.</p>
+      <p id="setter-detached">Detached original phrase.</p>
+      <p id="setter-detached-html">Detached HTML phrase.</p>
+      <div id="setter-hidden" style="display:none"><b>Untranslated content</b></div>
+      <iframe id="setter-frame" srcdoc="<p id='frame-source'>Frame original phrase.</p>"></iframe>
+    `;
+  });
+  const setterTabMsg = (msg) => sw.evaluate(async (m) => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/setter-test' });
+    return chrome.tabs.sendMessage(tab.id, m);
+  }, msg);
+  await setterPage.waitForTimeout(500);
+  await setterTabMsg({ type: 'start' });
+  await setterPage.waitForFunction(() =>
+    document.querySelector('#setter-text')?.textContent?.includes('IT:Original setter phrase.') &&
+    document.querySelector('#setter-html')?.textContent?.includes('IT:the link') &&
+    document.querySelector('#setter-detached')?.textContent?.includes('IT:Detached original phrase.') &&
+    document.querySelector('#setter-detached-html')?.textContent?.includes('IT:Detached HTML phrase.'),
+    null,
+    { timeout: 10000 },
+  );
+  const setterChecks = await setterPage.evaluate(() => {
+    function assignWithoutMutation(element, setter, value) {
+      const child = element.firstChild;
+      const before = element.innerHTML;
+      const observer = new MutationObserver(() => {});
+      observer.observe(element, { childList: true, subtree: true, characterData: true });
+      element[setter] = value;
+      const result = child === element.firstChild && before === element.innerHTML && observer.takeRecords().length === 0;
+      observer.disconnect();
+      return result;
+    }
+    const detached = document.querySelector('#setter-detached');
+    detached.remove();
+    const detachedText = assignWithoutMutation(detached, 'textContent', 'Detached original phrase.');
+    document.body.append(detached);
+    const detachedHtmlNode = document.querySelector('#setter-detached-html');
+    detachedHtmlNode.remove();
+    const detachedHtml = assignWithoutMutation(detachedHtmlNode, 'innerHTML', 'Detached HTML phrase.');
+    document.body.append(detachedHtmlNode);
+    const empty = document.createElement('div');
+    empty.append(document.createTextNode(''));
+    const numeric = document.createElement('div');
+    numeric.append(document.createTextNode('42'));
+    return {
+      text: assignWithoutMutation(document.querySelector('#setter-text'), 'textContent', 'Original setter phrase.'),
+      html: assignWithoutMutation(document.querySelector('#setter-html'), 'innerHTML', "Read <a href='/target'>the link</a> now."),
+      plain: assignWithoutMutation(document.querySelector('#setter-hidden'), 'innerHTML', '<b>Untranslated content</b>'),
+      segmentHtml: assignWithoutMutation(document.querySelector('#setter-text .xt-seg'), 'innerHTML', 'Original setter phrase.'),
+      detachedText,
+      detachedHtml,
+      nullText: assignWithoutMutation(empty, 'textContent', null),
+      numberText: assignWithoutMutation(numeric, 'textContent', 42),
+    };
+  });
+  check(setterChecks.text, 'equal textContent keeps translated nodes without mutation');
+  check(setterChecks.html, 'equal original innerHTML keeps translated markup without mutation');
+  check(setterChecks.plain, 'equal innerHTML keeps untranslated nodes without mutation');
+  check(setterChecks.segmentHtml, 'equal innerHTML on a translated segment compares original text');
+  check(setterChecks.detachedText, 'equal original textContent is intercepted on detached translated nodes');
+  check(setterChecks.detachedHtml, 'equal original innerHTML is intercepted on detached translated nodes');
+  check(setterChecks.nullText, 'equal null textContent preserves existing nodes');
+  check(setterChecks.numberText, 'equal numeric textContent preserves existing nodes');
+
+  const setterFrame = setterPage.frameLocator('#setter-frame').locator('#frame-source');
+  await setterFrame.waitFor();
+  await setterPage.waitForTimeout(1500);
+  const frameAssignment = await setterFrame.evaluate((element) => {
+    const before = element.innerHTML;
+    const child = element.firstChild;
+    const observer = new MutationObserver(() => {});
+    observer.observe(element, { childList: true, subtree: true, characterData: true });
+    element.textContent = 'Frame original phrase.';
+    const unchanged = element.firstChild === child && element.innerHTML === before && observer.takeRecords().length === 0;
+    observer.disconnect();
+    return before.includes('IT:') && unchanged;
+  });
+  check(frameAssignment, 'equal original textContent is intercepted in iframes');
+  await setterPage.evaluate(() => {
+    document.querySelector('#setter-html').innerHTML = 'Read <strong>the link</strong> now.';
+    document.querySelector('#setter-text').textContent = 'Changed setter phrase.';
+  });
+  check(await setterPage.locator('#setter-html strong').count() === 1, 'changed markup is not suppressed');
+  await setterPage.waitForFunction(() =>
+    document.querySelector('#setter-text')?.textContent?.includes('IT:Changed setter phrase.'),
+    null,
+    { timeout: 10000 },
+  );
+  check(true, 'changed text is translated normally');
+  await setterTabMsg({ type: 'restore' });
+  const afterRestore = await setterPage.evaluate(() => {
+    const element = document.querySelector('#setter-text');
+    const child = element.firstChild;
+    element.textContent = element.textContent;
+    return child !== element.firstChild;
+  });
+  check(afterRestore, 'restore returns page setters to normal behavior');
+  await setterPage.close();
   check(errors.length === 0, `no page errors ${errors.join(' ')}`);
 } finally {
   await ctx.close();

@@ -12,6 +12,33 @@ export function diagnosticElementPath(el: Element): string {
   return parts.join(' > ');
 }
 
+function diagnosticNode(node: Node, parentPath?: string): { path: string; preview?: string } {
+  const name = node.nodeName.toLowerCase();
+  const label = node.nodeType === Node.ELEMENT_NODE && (node as Element).id
+    ? `${name}#${(node as Element).id}`
+    : name;
+  const path = parentPath
+    ? `${parentPath} > ${label}`
+    : node.nodeType === Node.ELEMENT_NODE
+      ? diagnosticElementPath(node as Element)
+      : node.parentElement
+        ? `${diagnosticElementPath(node.parentElement)} > ${label}`
+        : label;
+  return node.nodeType === Node.TEXT_NODE
+    ? { path, preview: diagnosticTextPreview(node.nodeValue ?? '') }
+    : { path };
+}
+
+export function diagnosticMutation(record: MutationRecord) {
+  const target = diagnosticNode(record.target);
+  return {
+    type: record.type,
+    target,
+    addedNodes: Array.from(record.addedNodes, (node) => diagnosticNode(node, target.path)),
+    removedNodes: Array.from(record.removedNodes, (node) => diagnosticNode(node, target.path)),
+  };
+}
+
 export function analyzeMutationBatch<T>(
   records: readonly T[],
   isRelevant: (record: T) => boolean,

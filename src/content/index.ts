@@ -13,8 +13,8 @@ import {
   type TabRequest,
 } from '../shared/types';
 import { createBadge } from './badge';
-import { analyzeMutationBatch, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
-import { createSegSpan, isOwnNode, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
+import { analyzeMutationBatch, diagnosticMutation, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
+import { createSegSpan, isOwnNode, matchesOriginalInnerHTML, originalTextContent, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
 type ChunkState = 'checking' | 'queued' | 'busy' | 'done' | 'error' | 'oversized';
@@ -61,6 +61,45 @@ let port: Runtime.Port | null = null;
 let keepalive: ReturnType<typeof setInterval> | null = null;
 let observer: MutationObserver | null = null;
 let debounce: ReturnType<typeof setTimeout> | null = null;
+let setterGuardInstalled = false;
+
+function setterMatches(target: Node, type: string, value: string): boolean {
+  if (type === 'llm-page-translator:check-text-content' || type === 'llm-page-translator:detached-text') {
+    return originalTextContent(target) === value;
+  }
+  return target instanceof Element && matchesOriginalInnerHTML(target, value);
+}
+
+function checkSetter(event: Event): void {
+  if (!active || !(event instanceof CustomEvent) || typeof event.detail !== 'string') return;
+  const target = event.target;
+  if (!(target instanceof Node)) return;
+  if (setterMatches(target, event.type, event.detail)) event.preventDefault();
+}
+
+document.addEventListener('llm-page-translator:check-text-content', checkSetter, true);
+document.addEventListener('llm-page-translator:check-inner-html', checkSetter, true);
+
+const detachedSetterChecks = new Map<number, { type: string; value: string }>();
+function rememberDetachedSetter(event: Event): void {
+  if (!active || !(event instanceof CustomEvent) || typeof event.detail !== 'string') return;
+  const separator = event.detail.indexOf(':');
+  if (separator < 1) return;
+  const id = Number(event.detail.slice(0, separator));
+  if (!Number.isInteger(id) || id < 1) return;
+  detachedSetterChecks.set(id, { type: event.type, value: event.detail.slice(separator + 1) });
+}
+document.addEventListener('llm-page-translator:detached-text', rememberDetachedSetter, true);
+document.addEventListener('llm-page-translator:detached-html', rememberDetachedSetter, true);
+document.addEventListener('llm-page-translator:detached-target', (event) => {
+  if (!active || !(event instanceof FocusEvent)) return;
+  const check = detachedSetterChecks.get(event.detail);
+  const target = event.relatedTarget;
+  if (check && target instanceof Node && setterMatches(target, check.type, check.value)) event.preventDefault();
+}, true);
+document.addEventListener('llm-page-translator:detached-cleanup', (event) => {
+  if (event instanceof CustomEvent && typeof event.detail === 'string') detachedSetterChecks.delete(Number(event.detail));
+}, true);
 
 async function fetchConfig(): Promise<ContentConfig> {
   return (await browser.runtime.sendMessage({ type: 'getConfig' })) as ContentConfig;
@@ -507,6 +546,7 @@ function startObserver(): void {
         childListRecords: records.filter((record) => record.type === 'childList').length,
         characterDataRecords: records.filter((record) => record.type === 'characterData').length,
         debounceAction,
+        mutations: records.map(diagnosticMutation),
       });
     }
     if (!analysis.hasRelevantRecords) return;
@@ -530,6 +570,11 @@ function stopObserver(): void {
 
 async function start(): Promise<void> {
   cfg = await fetchConfig();
+  if (!setterGuardInstalled) await browser.runtime.sendMessage({ type: 'installSetterGuard' });
+  if (document.dispatchEvent(new Event('llm-page-translator:setter-guard-start', { cancelable: true }))) {
+    throw new Error('Could not activate the page setter guard');
+  }
+  setterGuardInstalled = true;
   active = true;
   injectStyles();
   scan();
@@ -539,6 +584,8 @@ async function start(): Promise<void> {
 
 function restore(): void {
   active = false;
+  detachedSetterChecks.clear();
+  document.dispatchEvent(new Event('llm-page-translator:setter-guard-stop'));
   stopObserver();
   stopKeepalive();
   for (const c of chunks.values()) {
@@ -618,4 +665,4 @@ fetchConfig()
   .then((c) => {
     if (c.autoTranslate && !active) return start();
   })
-  .catch(() => undefined);
+  .catch((error) => console.error('[LLM Page Translator] Could not start automatic translation', error));

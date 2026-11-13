@@ -146,6 +146,7 @@ export function createSegSpan(id: number, raw: string): HTMLSpanElement {
   span.className = SEG_CLASS;
   span.dataset.xtId = String(id);
   span.textContent = raw;
+  originals.set(span, raw);
   return span;
 }
 
@@ -173,6 +174,61 @@ export function restoreAll(): void {
     if (orig !== undefined) c.replaceWith(document.createTextNode(orig));
   });
   document.querySelectorAll(`.${BADGE_CLASS}`).forEach((b) => b.remove());
+}
+
+export function originalTextContent(node: Node): string | null {
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const original = originals.get(node as HTMLElement);
+    if (original !== undefined) return original;
+  }
+  if (node.nodeType === Node.TEXT_NODE || node.nodeType === Node.CDATA_SECTION_NODE) {
+    const parent = node.parentElement;
+    if (parent?.classList.contains(SEG_CLASS) && parent.childNodes.length === 1) {
+      const original = originals.get(parent);
+      if (original !== undefined) return original;
+    }
+    return node.nodeValue;
+  }
+  if (node.nodeType !== Node.ELEMENT_NODE && node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return node.textContent;
+  return Array.from(node.childNodes, (child) =>
+    child.nodeType === Node.COMMENT_NODE || child.nodeType === Node.PROCESSING_INSTRUCTION_NODE
+      ? ''
+      : originalTextContent(child) ?? '',
+  ).join('');
+}
+
+export function originalInnerHTML(element: Element): string {
+  const original = originals.get(element as HTMLElement);
+  if (original !== undefined) {
+    const inertDocument = document.implementation.createHTMLDocument('');
+    const container = inertDocument.createElement('span');
+    container.append(inertDocument.createTextNode(original));
+    return container.innerHTML;
+  }
+  const wrappers = Array.from(element.querySelectorAll<HTMLElement>(`.${NODE_CLASS}`));
+  if (!wrappers.some((wrapper) => originals.has(wrapper))) return element.innerHTML;
+  const inertDocument = document.implementation.createHTMLDocument('');
+  const copy = inertDocument.importNode(element, true);
+  const copiedWrappers = copy.querySelectorAll<HTMLElement>(`.${NODE_CLASS}`);
+  wrappers.forEach((wrapper, index) => {
+    const original = originals.get(wrapper);
+    if (original !== undefined) copiedWrappers[index].replaceWith(inertDocument.createTextNode(original));
+  });
+  return copy.innerHTML;
+}
+
+export function matchesOriginalInnerHTML(element: Element, value: string): boolean {
+  const original = originalInnerHTML(element);
+  if (original === value) return true;
+  const inertDocument = document.implementation.createHTMLDocument('');
+  const copy = inertDocument.importNode(element, false);
+  try {
+    copy.innerHTML = value;
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof DOMException && error.name === 'SyntaxError')) return false;
+    throw error;
+  }
+  return copy.innerHTML === original;
 }
 
 /** Split a raw phrase into leading whitespace, core text and trailing whitespace. */

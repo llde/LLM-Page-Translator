@@ -90,6 +90,7 @@ export interface PageStatus {
 /** Messages handled by background via runtime.sendMessage. */
 export type RuntimeRequest =
   | { type: 'getConfig' }
+  | { type: 'installSetterGuard' }
   | { type: 'testConnection'; settings?: GlobalSettings }
   | { type: 'clearPageMemory'; pageUrl: string; tabId: number }
   | { type: 'listModels'; backend?: Pick<GlobalSettings, 'provider' | 'baseUrl' | 'apiKey'> };

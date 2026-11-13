@@ -25,6 +25,7 @@ const options = {
   entryPoints: {
     'background': 'src/background/index.ts',
     'content': 'src/content/index.ts',
+    'pageSetters': 'src/content/pageSetters.ts',
     'popup/popup': 'src/popup/popup.ts',
     'options/options': 'src/options/options.ts',
   },

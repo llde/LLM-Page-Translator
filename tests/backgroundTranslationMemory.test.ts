@@ -29,6 +29,9 @@ const harness = vi.hoisted(() => ({
     webNavigation: {
       getAllFrames: vi.fn(),
     },
+    scripting: {
+      executeScript: vi.fn(),
+    },
     tabs: {
       onRemoved: { addListener: vi.fn() },
     },
@@ -157,6 +160,39 @@ describe('background translation memory context', () => {
       chunkId: 1,
       translations: { 7: 'Ciao.' },
     });
+  });
+
+  it('installs the setter guard in the requesting frame', async () => {
+    harness.browser.scripting.executeScript.mockResolvedValue([{ frameId: 5 }]);
+
+    await harness.onMessageListener?.(
+      { type: 'installSetterGuard' },
+      { tab: { id: 12 }, frameId: 5 },
+    );
+
+    expect(harness.browser.scripting.executeScript).toHaveBeenCalledWith({
+      target: { tabId: 12, frameIds: [5] },
+      files: ['pageSetters.js'],
+      world: 'MAIN',
+    });
+  });
+
+  it('surfaces setter guard injection failures', async () => {
+    harness.browser.scripting.executeScript.mockRejectedValue(new Error('injection failed'));
+
+    await expect(harness.onMessageListener?.(
+      { type: 'installSetterGuard' },
+      { tab: { id: 12 }, frameId: 5 },
+    )).rejects.toThrow('injection failed');
+  });
+
+  it('surfaces errors reported in Firefox injection results', async () => {
+    harness.browser.scripting.executeScript.mockResolvedValue([{ frameId: 5, error: 'script execution failed' }]);
+
+    await expect(harness.onMessageListener?.(
+      { type: 'installSetterGuard' },
+      { tab: { id: 12 }, frameId: 5 },
+    )).rejects.toThrow('script execution failed');
   });
 });
 

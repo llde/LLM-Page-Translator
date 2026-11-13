@@ -292,11 +292,26 @@ async function testConnection(settings?: GlobalSettings) {
 browser.runtime.onMessage.addListener((raw: unknown, sender: Runtime.MessageSender) => {
   const msg = raw as RuntimeRequest;
   if (msg?.type === 'getConfig') return getContentConfig(sender);
+  if (msg?.type === 'installSetterGuard') return installSetterGuard(sender);
   if (msg?.type === 'testConnection') return testConnection(msg.settings);
   if (msg?.type === 'clearPageMemory') return clearPageMemory(msg.pageUrl, msg.tabId);
   if (msg?.type === 'listModels') return listModels(msg.backend);
   return undefined;
 });
+
+async function installSetterGuard(sender: Runtime.MessageSender): Promise<void> {
+  const tabId = sender.tab?.id;
+  const frameId = sender.frameId;
+  if (tabId === undefined || frameId === undefined) throw new Error('Cannot install setter guard without a tab and frame');
+  const results = await browser.scripting.executeScript({
+    target: { tabId, frameIds: [frameId] },
+    files: ['pageSetters.js'],
+    world: 'MAIN',
+  });
+  const result = results.find((entry) => entry.frameId === frameId);
+  if (!result) throw new Error(`Could not install setter guard in frame ${frameId}`);
+  if ('error' in result) throw new Error(`Setter guard failed in frame ${frameId}: ${String(result.error)}`);
+}
 
 async function clearPageMemory(pageUrl: string, tabId: number) {
   const cfg = await getSettings(tabId, pageUrl);

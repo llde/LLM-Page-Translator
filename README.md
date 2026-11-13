@@ -15,6 +15,7 @@ LLM served by **Ollama**, **OpenWebUI** or any **OpenAI-compatible** API.
 - A phrase longer than the max chunk size is not sent: an orange overlay lets you **Send as one chunk**
   (raises the limit for that chunk only) or **Split** it (at `, ; :`, then at words).
 - Text added to the page later (infinite scroll, SPA updates) is translated too (can be disabled).
+- While translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. Different text or markup is applied normally.
 
 ## Build
 
@@ -71,7 +72,8 @@ matching rules persist across browser restarts, and the most specific matching p
 followed by a saved URL rule and then the global default tab prompt.
 per-tab overrides for chunk size / model / temperature, *Translate page*, *Restore original*, *Retry failed*,
 *Always translate this site*, live progress, and a per-tab *Text scan diagnostics* toggle. When enabled, text-node
-accept/reject decisions, chunk dispatch, backend completion/failure, and DOM replacement (with short text previews)
+accept/reject decisions, observer mutations (including added, removed, and changed nodes), chunk dispatch,
+backend completion/failure, and DOM replacement (with short text previews)
 are logged to the tab's DevTools console; backend request-stage events also appear in the extension service worker console.
 
 ## Ollama CORS
