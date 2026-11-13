@@ -1,7 +1,7 @@
 import type { Runtime } from 'webextension-polyfill';
 import { browser } from '../shared/browser';
 import { buildChunks } from '../shared/chunker';
-import { splitOversized, splitPhrases } from '../shared/phrases';
+import { splitNumberSeparatedPhrases, splitOversized, splitPhrases } from '../shared/phrases';
 import {
   PORT_NAME,
   type ContentConfig,
@@ -488,10 +488,14 @@ function addChunks(payload: SegmentPayload[]): void {
 function scan(): void {
   if (!active || !document.body) return;
   const diagnostics = cfg?.textDiagnostics ?? false;
+  const separateNumbers = cfg?.separateNumbers ?? false;
   const payload: SegmentPayload[] = [];
+  const flush = () => {
+    if (payload.length) addChunks(payload.splice(0));
+  };
   const items = [
-    ...scanTextNodes(document.body, diagnostics).map(({ node, domLevel }) => ({ kind: 'text' as const, node, domLevel })),
-    ...scanFormInputs(document.body, diagnostics).map(({ input, domLevel }) => ({ kind: 'input' as const, node: input, domLevel })),
+    ...scanTextNodes(document.body, diagnostics, separateNumbers).map(({ node, domLevel }) => ({ kind: 'text' as const, node, domLevel })),
+    ...scanFormInputs(document.body, diagnostics, separateNumbers).map(({ input, domLevel }) => ({ kind: 'input' as const, node: input, domLevel })),
   ].sort((a, b) => {
     const position = a.node.compareDocumentPosition(b.node);
     if (position & Node.DOCUMENT_POSITION_FOLLOWING) return -1;
@@ -501,15 +505,27 @@ function scan(): void {
   for (const item of items) {
     if (item.kind === 'text') {
       if (ignoredSliceText.get(item.node) === item.node.data) {
+        if (separateNumbers && /\p{N}/u.test(item.node.data)) flush();
         if (diagnostics) logTextDiagnostic('scan ignored substring', { preview: diagnosticTextPreview(item.node.data) });
         continue;
       }
-      for (const w of wrapTextNode(item.node, () => nextSegId++)) {
+      const hasNumbers = separateNumbers && /\p{N}/u.test(item.node.data);
+      if (hasNumbers) flush();
+      if (hasNumbers && !/\p{L}/u.test(item.node.data)) continue;
+      for (const w of wrapTextNode(item.node, () => nextSegId++, separateNumbers)) {
+        if ('separator' in w) {
+          flush();
+          continue;
+        }
         segs.set(w.id, { id: w.id, element: w.span, raw: w.raw, domLevel: item.domLevel });
         payload.push({ id: w.id, text: w.raw, domLevel: item.domLevel });
       }
+      if (hasNumbers) flush();
     } else {
+      const hasNumbers = separateNumbers && /\p{N}/u.test(item.node.value);
+      if (hasNumbers) flush();
       if (scannedInputs.has(item.node)) continue;
+      if (hasNumbers && !/\p{L}/u.test(item.node.value)) continue;
       scannedInputs.add(item.node);
       const group: InputGroup = {
         input: item.node,
@@ -518,16 +534,24 @@ function scan(): void {
         segments: [],
       };
       inputGroups.add(group);
-      for (const raw of splitPhrases(item.node.value)) {
+      const parts = separateNumbers
+        ? splitNumberSeparatedPhrases(item.node.value)
+        : splitPhrases(item.node.value).map((raw) => ({ raw, kind: 'text' as const }));
+      for (const { raw, kind } of parts) {
         const id = nextSegId++;
         const seg: Seg = { id, element: item.node, raw, domLevel: item.domLevel, inputGroup: group };
         group.segments.push(seg);
+        if (kind !== 'text') {
+          if (kind === 'number') flush();
+          continue;
+        }
         segs.set(id, seg);
         payload.push({ id, text: raw, domLevel: item.domLevel });
       }
+      if (hasNumbers) flush();
     }
   }
-  addChunks(payload);
+  flush();
 }
 
 function isRelevantMutation(m: MutationRecord): boolean {

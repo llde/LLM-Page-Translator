@@ -273,6 +273,7 @@ async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentC
     maxChunkSize: cfg.maxChunkSize,
     concurrency: Math.max(1, cfg.concurrency),
     translateDynamic: cfg.translateDynamic,
+    separateNumbers: cfg.separateNumbers,
     experimentalSliceGuard: cfg.experimentalSliceGuard,
     autoTranslate: !!host && cfg.autoTranslateSites.includes(host),
     textDiagnostics: cfg.textDiagnostics,

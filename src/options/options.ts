@@ -51,6 +51,7 @@ function fill(s: GlobalSettings) {
   for (const k of TEXT_KEYS) input(k).value = String(s[k]);
   for (const k of NUMBER_KEYS) input(k).value = String(s[k]);
   input('translateDynamic').checked = s.translateDynamic;
+  input('separateNumbers').checked = s.separateNumbers;
   input('experimentalSliceGuard').checked = s.experimentalSliceGuard;
   input('autoTranslateSites').value = s.autoTranslateSites.join('\n');
   modelSelect.dataset.saved = s.model;
@@ -70,6 +71,7 @@ function read(): GlobalSettings {
   s.defaultTabPrompt = input('defaultTabPrompt').value;
   for (const k of NUMBER_KEYS) s[k] = Number(input(k).value);
   s.translateDynamic = input('translateDynamic').checked;
+  s.separateNumbers = input('separateNumbers').checked;
   s.experimentalSliceGuard = input('experimentalSliceGuard').checked;
   s.autoTranslateSites = input('autoTranslateSites')
     .value.split(/\s+/)

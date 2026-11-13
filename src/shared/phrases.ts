@@ -44,6 +44,24 @@ export function splitPhrases(text: string): string[] {
   return mergeBlank(rawSentences(text));
 }
 
+export interface NumberSeparatedPiece {
+  raw: string;
+  kind: 'text' | 'number' | 'literal';
+}
+
+/** Split at numeric runs while retaining every character in its original order. */
+export function splitNumberSeparatedPhrases(text: string): NumberSeparatedPiece[] {
+  if (!/\p{N}/u.test(text)) return splitPhrases(text).map((raw) => ({ raw, kind: 'text' }));
+  const pieces: NumberSeparatedPiece[] = [];
+  for (const raw of text.split(/(\p{N}+)/u)) {
+    if (!raw) continue;
+    if (/^\p{N}+$/u.test(raw)) pieces.push({ raw, kind: 'number' });
+    else if (/\p{L}/u.test(raw)) pieces.push(...splitPhrases(raw).map((phrase) => ({ raw: phrase, kind: 'text' as const })));
+    else pieces.push({ raw, kind: 'literal' });
+  }
+  return pieces;
+}
+
 /** Greedily pack consecutive parts so that each packed piece's trimmed length is <= max. */
 function pack(parts: string[], max: number): string[] {
   const out: string[] = [];

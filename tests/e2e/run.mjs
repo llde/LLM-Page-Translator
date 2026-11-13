@@ -65,7 +65,9 @@ const server = http.createServer((req, res) => {
   }
   if (req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
-    return res.end(req.url === '/iframe-test' ? FRAME_PAGE : PAGE);
+    return res.end(req.url === '/iframe-test' ? FRAME_PAGE
+      : req.url === '/numbers-test' ? '<!doctype html><html><body></body></html>'
+        : PAGE);
   }
   let body = '';
   req.on('data', (c) => (body += c));
@@ -616,6 +618,10 @@ try {
       const hasSliceOption = (await sliceOption.count()) === 1;
       check(hasSliceOption && !(await sliceOption.isChecked()), 'experimental slice option is available and disabled by default');
       if (hasSliceOption) await sliceOption.check();
+      const numberOption = pg.locator('input[name=separateNumbers]');
+      const hasNumberOption = (await numberOption.count()) === 1;
+      check(hasNumberOption && !(await numberOption.isChecked()), 'number separator option is available and disabled by default');
+      if (hasNumberOption) await numberOption.check();
       const opts = await pg.locator('select[name=model] option').allTextContents();
       check(JSON.stringify(opts) === JSON.stringify(['mock', 'other']), `options model list from backend: ${JSON.stringify(opts)}`);
       check((await pg.locator('select[name=model]').inputValue()) === 'mock', 'options shows saved model');
@@ -625,8 +631,10 @@ try {
       const savedSettings = await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
       check(savedSettings.tabPromptRules?.[0]?.prompt === 'E2E saved URL prompt', 'saving global options preserves URL prompt rules');
       check(hasSliceOption && savedSettings.experimentalSliceGuard === true, 'options save the experimental slice setting');
+      check(hasNumberOption && savedSettings.separateNumbers === true, 'options save the number separator setting');
       if (hasSliceOption) {
         await sliceOption.uncheck();
+        if (hasNumberOption) await numberOption.uncheck();
         await pg.locator('button[type=submit]').click();
         await pg.waitForFunction(() => document.querySelector('#msg')?.textContent?.startsWith('Saved'));
       }
@@ -651,6 +659,7 @@ try {
       <p id="setter-html">Read <a href="/target">the link</a> now.</p>
       <p id="setter-detached">Detached original phrase.</p>
       <p id="setter-detached-html">Detached HTML phrase.</p>
+      <p id="setter-number">Normal value 43 units.</p>
       <div id="setter-hidden" style="display:none"><b>Untranslated content</b></div>
       <iframe id="setter-frame" srcdoc="<p id='frame-source'>Frame original phrase.</p>"></iframe>
     `;
@@ -666,7 +675,8 @@ try {
     document.querySelector('#setter-text')?.textContent?.includes('IT:Original setter phrase.') &&
     document.querySelector('#setter-html')?.textContent?.includes('IT:the link') &&
     document.querySelector('#setter-detached')?.textContent?.includes('IT:Detached original phrase.') &&
-    document.querySelector('#setter-detached-html')?.textContent?.includes('IT:Detached HTML phrase.'),
+    document.querySelector('#setter-detached-html')?.textContent?.includes('IT:Detached HTML phrase.') &&
+    document.querySelector('#setter-number')?.textContent?.includes('IT:Normal value 43 units.'),
     null,
     { timeout: 10000 },
   );
@@ -750,7 +760,7 @@ try {
 
   await sw.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...settings, experimentalSliceGuard: true } });
+    await chrome.storage.local.set({ settings: { ...settings, experimentalSliceGuard: true, separateNumbers: true } });
   });
   const slicePage = await ctx.newPage();
   slicePage.on('pageerror', (e) => errors.push(String(e)));
@@ -820,6 +830,11 @@ try {
     direct.appendChild(document.createTextNode('Initial direct text.'));
     document.body.appendChild(direct);
     direct.firstChild.textContent = 'Direct substring source'.slice(0, 6);
+    const boundaryHost = document.createElement('p');
+    const boundary = document.createElement('span');
+    boundaryHost.append('SliceBoundaryBefore ', boundary, ' SliceBoundaryAfter');
+    document.body.appendChild(boundaryHost);
+    boundary.textContent = 'Slice 123'.slice(6);
     result.primitiveText = typeof document.querySelector('#slice-only').textContent === 'string';
     return result;
   });
@@ -843,6 +858,13 @@ try {
     !requests.slice(requestStart).some((request) => request.messages[1].content.includes('Unique') || request.messages[1].content.includes('Frame') || request.messages[1].content.includes('Direct')),
     'ignored slice mutations do not reach the provider',
   );
+  const sliceBoundaryRequests = requests.slice(requestStart).map((request) => request.messages[1].content);
+  check(
+    sliceBoundaryRequests.some((request) => request.includes('SliceBoundaryBefore')) &&
+    sliceBoundaryRequests.some((request) => request.includes('SliceBoundaryAfter')) &&
+    !sliceBoundaryRequests.some((request) => request.includes('SliceBoundaryBefore') && request.includes('SliceBoundaryAfter')),
+    'an ignored slice containing numbers still separates surrounding chunks',
+  );
   check(
     sliceDiagnostics.slice(sliceStart).some((summary) =>
       summary.mutations?.some((mutation) => mutation.sliceWrapper === true && mutation.isSubstring === true)),
@@ -856,6 +878,94 @@ try {
   await sliceTabMsg({ type: 'restore' });
   check(await slicePage.evaluate(() => typeof 'ordinary'.slice(0, 3) === 'string'), 'restore removes experimental slice wrapping');
   await slicePage.close();
+
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalSliceGuard: false, separateNumbers: true } });
+  });
+  const numberPage = await ctx.newPage();
+  numberPage.on('pageerror', (e) => errors.push(String(e)));
+  await numberPage.goto(`http://127.0.0.1:${PORT}/numbers-test`);
+  await numberPage.evaluate(() => {
+    document.body.innerHTML = `
+      <p>Unrelated neighboring phrase.</p>
+      <p id="number-text">Balance 12.5 credits.</p>
+      <p>Another neighboring phrase.</p>
+      <p id="number-inline">BoundaryBefore <span>99</span> BoundaryAfter</p>
+      <p id="number-word">Device24h ready.</p>
+      <p id="number-unicode">Quantity ١٢٫٥ units.</p>
+      <form><input id="number-input" type="text" value="Inventory 7 units."></form>
+      <iframe id="number-frame" srcdoc="<p id='number-frame-text'>Framecount 21 objects.</p>"></iframe>
+    `;
+  });
+  const numberTabMsg = (msg) => sw.evaluate(async (m) => {
+    const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/numbers-test' });
+    return chrome.tabs.sendMessage(tab.id, m);
+  }, msg);
+  const waitForNumberTranslations = async () => {
+    let status;
+    for (let attempt = 0; attempt < 150; attempt++) {
+      status = await sw.evaluate(async () => {
+        const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/numbers-test' });
+        return chrome.tabs.sendMessage(tab.id, { type: 'status' }, { frameId: 0 });
+      });
+      if (status.total > 0 && status.done === status.total) return;
+      if (status.errors || status.oversized) break;
+      await numberPage.waitForTimeout(100);
+    }
+    throw new Error(`Number translation did not finish: ${JSON.stringify(status)}`);
+  };
+  await numberPage.waitForTimeout(500);
+  const numberRequestStart = requests.length;
+  await numberTabMsg({ type: 'start' });
+  await waitForNumberTranslations();
+  const numberFrame = numberPage.frameLocator('#number-frame').locator('#number-frame-text');
+  await numberFrame.waitFor();
+  await numberPage.waitForFunction(() =>
+    document.querySelector('#number-frame')?.contentDocument?.querySelector('#number-frame-text')?.textContent === 'IT:Framecount 21 IT:objects.',
+    null, { timeout: 15000 });
+  check((await numberPage.locator('#number-text').textContent()) === 'IT:Balance 12.5 IT:credits.', 'numbers and decimal punctuation remain unchanged between translated chunks');
+  check((await numberPage.locator('#number-word').textContent()) === 'IT:Device24IT:h ready.', 'digits inside words separate translated chunks');
+  check((await numberPage.locator('#number-unicode').textContent()) === 'IT:Quantity ١٢٫٥ IT:units.', 'non-ASCII numbers and their punctuation are preserved');
+  check((await numberPage.locator('#number-input').inputValue()) === 'IT:Inventory 7 IT:units.', 'input values preserve numbers between translated chunks');
+  const numberRequests = requests.slice(numberRequestStart).map((request) => request.messages[1].content);
+  check(!numberRequests.some((request) => {
+    const text = request.split('Translate this phrase, preserving the inline span markers:\n')[1] ?? '';
+    return /\p{N}/u.test(text.replace(/\[\d+\]/g, ''));
+  }), 'number separators are not sent to the provider');
+  check(!numberRequests.some((request) => request.includes('BoundaryBefore') && request.includes('BoundaryAfter')), 'a numeric-only node separates surrounding chunks');
+  const beforeInputBoundary = requests.length;
+  await numberPage.locator('#number-input').evaluate((input) => {
+    input.before(document.createTextNode('EarlierBoundary '));
+    input.after(document.createTextNode(' LaterBoundary'));
+  });
+  await numberPage.waitForFunction(() => {
+    const text = document.querySelector('#number-input')?.parentElement?.textContent ?? '';
+    return text.includes('IT:EarlierBoundary') && text.includes('IT:LaterBoundary');
+  }, null, { timeout: 10000 });
+  await waitForNumberTranslations();
+  const inputBoundaryRequests = requests.slice(beforeInputBoundary).map((request) => request.messages[1].content);
+  check(!inputBoundaryRequests.some((request) => request.includes('EarlierBoundary') && request.includes('LaterBoundary')), 'an already translated input still separates later chunks');
+  const beforeNumberUpdate = requests.length;
+  await numberPage.locator('#number-text').evaluate((element) => { element.textContent = 'Balance 13.5 credits.'; });
+  await numberFrame.evaluate((element) => { element.textContent = 'Framecount 22 objects.'; });
+  await numberPage.waitForTimeout(2500);
+  check((await numberPage.locator('#number-text').textContent()) === 'IT:Balance 13.5 IT:credits.', 'changed numbers preserve cached surrounding translations');
+  check((await numberFrame.textContent()) === 'IT:Framecount 22 IT:objects.', 'iframe number updates preserve cached surrounding translations');
+  check(requests.length === beforeNumberUpdate, 'updating only a number reuses translation memory without provider requests');
+  await numberTabMsg({ type: 'restore' });
+  check((await numberPage.locator('#number-text').textContent()) === 'Balance 13.5 credits.' &&
+    (await numberPage.locator('#number-input').inputValue()) === 'Inventory 7 units.', 'restore preserves original text and numbers');
+  await numberPage.locator('#number-input').evaluate((input) => { input.value = 'Inventory 8 units.'; });
+  const beforeNumberRestart = requests.length;
+  await numberTabMsg({ type: 'start' });
+  await waitForNumberTranslations();
+  await numberPage.waitForFunction(() =>
+    document.querySelector('#number-frame')?.contentDocument?.querySelector('#number-frame-text')?.textContent === 'IT:Framecount 22 IT:objects.',
+    null, { timeout: 10000 });
+  check((await numberPage.locator('#number-input').inputValue()) === 'IT:Inventory 8 IT:units.', 'input values reuse translations after a number changes');
+  check(requests.length === beforeNumberRestart, 'restarting with changed input numbers reuses translation memory');
+  await numberPage.close();
   check(errors.length === 0, `no page errors ${errors.join(' ')}`);
 } finally {
   await ctx.close();

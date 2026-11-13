@@ -1,4 +1,4 @@
-import { splitPhrases } from '../shared/phrases';
+import { splitNumberSeparatedPhrases, splitPhrases } from '../shared/phrases';
 import { diagnosticElementPath, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
 
 export const NODE_CLASS = 'xt-node';
@@ -12,6 +12,7 @@ const SKIP_TAGS = new Set([
 ]);
 
 const HAS_LETTER = /\p{L}/u;
+const HAS_NUMBER = /\p{N}/u;
 const TRANSLATABLE_INPUT_TYPES = new Set(['text', 'search', 'url', 'tel', 'email', 'submit']);
 
 /** Original text of each wrapper, used to restore the page. */
@@ -52,7 +53,7 @@ export interface ScannedInput {
 }
 
 /** Collect visible, translatable text nodes under root with their depth, in document order. */
-export function scanTextNodes(root: Element, diagnostics = false): ScannedTextNode[] {
+export function scanTextNodes(root: Element, diagnostics = false, separateNumbers = false): ScannedTextNode[] {
   const out: ScannedTextNode[] = [];
   const walker = document.createTreeWalker(root, NodeFilter.SHOW_ELEMENT | NodeFilter.SHOW_TEXT, {
     acceptNode(node) {
@@ -72,7 +73,7 @@ export function scanTextNodes(root: Element, diagnostics = false): ScannedTextNo
         if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'empty or whitespace only' });
         return NodeFilter.FILTER_REJECT;
       }
-      if (!HAS_LETTER.test(t)) {
+      if (!HAS_LETTER.test(t) && !(separateNumbers && HAS_NUMBER.test(t))) {
         if (diagnostics) logTextDiagnostic('scan rejected text', { path, reason: 'contains no letters', preview: diagnosticTextPreview(t) });
         return NodeFilter.FILTER_REJECT;
       }
@@ -94,7 +95,7 @@ export function scanTextNodes(root: Element, diagnostics = false): ScannedTextNo
 }
 
 /** Collect visible, unnamed text-entry inputs in forms when they have an explicit value. */
-export function scanFormInputs(root: Element, diagnostics = false): ScannedInput[] {
+export function scanFormInputs(root: Element, diagnostics = false, separateNumbers = false): ScannedInput[] {
   const out: ScannedInput[] = [];
   if (diagnostics) logTextDiagnostic('input scan started', { root: diagnosticElementPath(root) });
   for (const input of root.querySelectorAll<HTMLInputElement>('input')) {
@@ -107,7 +108,7 @@ export function scanFormInputs(root: Element, diagnostics = false): ScannedInput
     else if (input.closest('[translate="no"], .notranslate')) reason = 'translation disabled by page';
     else if (!isVisible(input)) reason = 'not visible';
     else if (!input.value.trim()) reason = 'empty or whitespace only';
-    else if (!HAS_LETTER.test(input.value)) reason = 'contains no letters';
+    else if (!HAS_LETTER.test(input.value) && !(separateNumbers && HAS_NUMBER.test(input.value))) reason = 'contains no letters';
 
     if (reason) {
       if (diagnostics) {
@@ -151,13 +152,21 @@ export function createSegSpan(id: number, raw: string): HTMLSpanElement {
 }
 
 /** Replace a text node with `span.xt-node > span.xt-seg*` (one per phrase). */
-export function wrapTextNode(text: Text, nextId: () => number): WrappedSegment[] {
+export function wrapTextNode(text: Text, nextId: () => number, separateNumbers = false): (WrappedSegment | { separator: true })[] {
   const value = text.nodeValue ?? '';
   const container = document.createElement('span');
   container.className = NODE_CLASS;
   originals.set(container, value);
-  const segs: WrappedSegment[] = [];
-  for (const raw of splitPhrases(value)) {
+  const segs: (WrappedSegment | { separator: true })[] = [];
+  const parts = separateNumbers
+    ? splitNumberSeparatedPhrases(value)
+    : splitPhrases(value).map((raw) => ({ raw, kind: 'text' as const }));
+  for (const { raw, kind } of parts) {
+    if (kind !== 'text') {
+      container.appendChild(document.createTextNode(raw));
+      if (kind === 'number') segs.push({ separator: true });
+      continue;
+    }
     const id = nextId();
     const span = createSegSpan(id, raw);
     container.appendChild(span);
