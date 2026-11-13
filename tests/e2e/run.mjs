@@ -8,6 +8,8 @@ const PORT = 8765;
 const FRAME_PORT = 8766;
 let failMode = true;
 const requests = [];
+let activeProviderRequests = 0;
+let maxActiveProviderRequests = 0;
 
 const PAGE = `<!doctype html><html><head><title>t</title></head><body>
 <h1>Welcome to the test page</h1>
@@ -70,6 +72,8 @@ const server = http.createServer((req, res) => {
   req.on('end', () => {
     const json = JSON.parse(body);
     requests.push(json);
+    activeProviderRequests++;
+    maxActiveProviderRequests = Math.max(maxActiveProviderRequests, activeProviderRequests);
     const user = json.messages.find((m) => m.role === 'user').content;
     const phrase = user.split('Translate this phrase, preserving the inline span markers:\n')[1] ?? '';
     const markers = [...phrase.matchAll(/\[(\d+)\]\s*/g)];
@@ -79,6 +83,7 @@ const server = http.createServer((req, res) => {
       return [marker[1], phrase.slice(start, end).trim()];
     });
     setTimeout(() => {
+      activeProviderRequests--;
       if (failMode && user.includes('FAILME')) {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'mock model exploded' }));
@@ -86,7 +91,7 @@ const server = http.createServer((req, res) => {
       const out = segs.map(([id, t]) => `[${id}] IT:${t}`).join('\n');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ message: { role: 'assistant', content: `<think>hmm</think><translated_text>\n${out}\n</translated_text>` }, done_reason: 'stop' }));
-    }, 700);
+    }, user.includes('PREFLIGHT-MISS') ? 2000 : 700);
   });
 });
 await new Promise((r) => server.listen(PORT, '127.0.0.1', r));
@@ -344,6 +349,50 @@ try {
   check(requests.length === cachedRequestCount, 'retranslating the same page reuses successful chunk memory');
   check(memoryDiagnostics().some((line) => line.includes('translation memory hit')), 'enabled diagnostics log memory hits');
   await tabMsg({ type: 'restore' });
+
+  const preflightRequestStart = requests.length;
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, concurrency: 1 } });
+  });
+  await page.evaluate(() => {
+    document.querySelector('h1').textContent = 'PREFLIGHT-MISS first uncached phrase.';
+    const container = document.createElement('div');
+    container.innerHTML = '<div><p id="preflight-later">PREFLIGHT-MISS later uncached phrase.</p></div>';
+    document.body.append(container);
+  });
+  maxActiveProviderRequests = 0;
+  await tabMsg({ type: 'start' });
+  await page.waitForTimeout(300);
+  check(
+    (await page.locator('#p1').innerText()).includes('IT:The first sentence is here.'),
+    'cached text applies while the first uncached LLM request occupies the only slot',
+  );
+  check(
+    requests.filter((request) => request.messages[1].content.includes('PREFLIGHT-MISS')).length === 1,
+    'only one uncached provider request starts with concurrency set to one',
+  );
+  await page.waitForFunction(
+    () =>
+      document.querySelector('h1')?.innerText.includes('IT:PREFLIGHT-MISS first uncached phrase.') &&
+      document.querySelector('#preflight-later')?.innerText.includes('IT:PREFLIGHT-MISS later uncached phrase.'),
+    null,
+    { timeout: 7000 },
+  );
+  check(
+    (await page.locator('h1').innerText()).includes('IT:PREFLIGHT-MISS first uncached phrase.') &&
+      (await page.locator('#preflight-later').innerText()).includes('IT:PREFLIGHT-MISS later uncached phrase.'),
+    'both uncached chunks translate after obtaining provider slots',
+  );
+  check(
+    requests.length - preflightRequestStart === 2 && maxActiveProviderRequests === 1,
+    `provider requests respect concurrency one (${requests.length - preflightRequestStart} requests, max ${maxActiveProviderRequests} active)`,
+  );
+  await tabMsg({ type: 'restore' });
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, concurrency: 2 } });
+  });
 
   // Oversized "send as one chunk" path
   await tabMsg({ type: 'start' });

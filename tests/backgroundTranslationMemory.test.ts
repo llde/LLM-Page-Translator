@@ -9,7 +9,9 @@ const harness = vi.hoisted(() => ({
     model: 'mock',
     textDiagnostics: false,
     requestTimeoutSec: 1,
+    concurrency: 1,
   },
+  getTranslationMemory: vi.fn(),
   browser: {
     runtime: {
       getURL: () => 'chrome-extension://test/',
@@ -43,7 +45,7 @@ vi.mock('../src/shared/settings', () => ({
 }));
 vi.mock('../src/shared/translationMemory', () => ({
   clearPageTranslationMemory: vi.fn(),
-  getTranslationMemory: vi.fn(async () => undefined),
+  getTranslationMemory: harness.getTranslationMemory,
   setTranslationMemory: vi.fn(),
   visitTranslationMemory: vi.fn(async () => ({ expiredPages: 0, expiredEntries: 0 })),
 }));
@@ -69,6 +71,7 @@ describe('background translation memory context', () => {
   beforeEach(() => {
     harness.onPortMessageListener = undefined;
     harness.browser.webNavigation.getAllFrames.mockRejectedValue(new Error('frame metadata unavailable'));
+    harness.getTranslationMemory.mockReset().mockResolvedValue(undefined);
     vi.stubGlobal(
       'fetch',
       vi.fn(async () => ({
@@ -85,21 +88,65 @@ describe('background translation memory context', () => {
     vi.clearAllMocks();
   });
 
-  it('translates without caching when frame ancestry lookup fails', async () => {
-    const port = {
-      name: PORT_NAME,
-      sender: { tab: { id: 12, url: 'https://example.com/article' }, frameId: 5 },
-      onMessage: {
-        addListener(listener: (message: unknown) => Promise<void>) {
-          harness.onPortMessageListener = listener;
-        },
-      },
-      onDisconnect: { addListener: vi.fn() },
-      postMessage: vi.fn(),
-    };
-    harness.onConnectListener?.(port as unknown as Runtime.Port);
+  it('returns a memory hit without entering the provider path', async () => {
+    const port = connectPort();
+    harness.browser.webNavigation.getAllFrames.mockResolvedValue([
+      { frameId: 0, parentFrameId: -1, url: 'https://example.com/article' },
+      { frameId: 5, parentFrameId: 0, url: 'https://example.com/frame' },
+    ]);
+    harness.getTranslationMemory.mockResolvedValue({ 7: 'Ciao.' });
 
-    await harness.onPortMessageListener?.({
+    await sendPortMessage({
+      type: 'checkMemory',
+      chunkId: 2,
+      segments: [{ id: 7, text: 'Hello.' }],
+    });
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'memoryHit',
+      chunkId: 2,
+      translations: { 7: 'Ciao.' },
+    });
+    expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it('returns a memory miss when frame ancestry is unavailable', async () => {
+    const port = connectPort();
+
+    await sendPortMessage({
+      type: 'checkMemory',
+      chunkId: 3,
+      segments: [{ id: 7, text: 'Hello.' }],
+    });
+
+    expect(port.postMessage).toHaveBeenCalledWith({ type: 'memoryMiss', chunkId: 3 });
+    expect(harness.getTranslationMemory).not.toHaveBeenCalled();
+  });
+
+  it('surfaces translation-memory storage failures instead of treating them as misses', async () => {
+    const port = connectPort();
+    harness.browser.webNavigation.getAllFrames.mockResolvedValue([
+      { frameId: 0, parentFrameId: -1, url: 'https://example.com/article' },
+      { frameId: 5, parentFrameId: 0, url: 'https://example.com/frame' },
+    ]);
+    harness.getTranslationMemory.mockRejectedValue(new Error('storage unavailable'));
+
+    await sendPortMessage({
+      type: 'checkMemory',
+      chunkId: 4,
+      segments: [{ id: 7, text: 'Hello.' }],
+    });
+
+    expect(port.postMessage).toHaveBeenCalledWith({
+      type: 'error',
+      chunkId: 4,
+      error: expect.objectContaining({ message: 'storage unavailable' }),
+    });
+  });
+
+  it('translates without caching when frame ancestry lookup fails', async () => {
+    const port = connectPort();
+    await sendPortMessage({
       type: 'translate',
       chunkId: 1,
       segments: [{ id: 7, text: 'Hello.' }],
@@ -112,3 +159,23 @@ describe('background translation memory context', () => {
     });
   });
 });
+
+function connectPort() {
+  const port = {
+    name: PORT_NAME,
+    sender: { tab: { id: 12, url: 'https://example.com/article' }, frameId: 5 },
+    onMessage: {
+      addListener(listener: (message: unknown) => Promise<void>) {
+        harness.onPortMessageListener = listener;
+      },
+    },
+    onDisconnect: { addListener: vi.fn() },
+    postMessage: vi.fn(),
+  };
+  harness.onConnectListener?.(port as unknown as Runtime.Port);
+  return port;
+}
+
+async function sendPortMessage(message: unknown): Promise<void> {
+  await harness.onPortMessageListener?.(message);
+}

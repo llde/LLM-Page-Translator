@@ -57,12 +57,15 @@ export interface ChatMessage {
 
 /** Content script -> background (over the "xt" port). */
 export type PortIn =
+  | { type: 'checkMemory'; chunkId: number; segments: SegmentPayload[] }
   | { type: 'translate'; chunkId: number; segments: SegmentPayload[] }
   | { type: 'cancel'; chunkId: number }
   | { type: 'ping' };
 
 /** Background -> content script (over the "xt" port). */
 export type PortOut =
+  | { type: 'memoryHit'; chunkId: number; translations: Record<number, string> }
+  | { type: 'memoryMiss'; chunkId: number }
   | { type: 'result'; chunkId: number; translations: Record<number, string> }
   | { type: 'error'; chunkId: number; error: ErrorInfo };
 

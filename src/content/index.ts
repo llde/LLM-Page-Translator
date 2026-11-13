@@ -17,7 +17,7 @@ import { analyzeMutationBatch, diagnosticTextPreview, logTextDiagnostic } from '
 import { createSegSpan, isOwnNode, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
-type ChunkState = 'queued' | 'busy' | 'done' | 'error' | 'oversized';
+type ChunkState = 'checking' | 'queued' | 'busy' | 'done' | 'error' | 'oversized';
 
 interface Seg {
   id: number;
@@ -78,11 +78,11 @@ function ensurePort(): Runtime.Port {
     stopKeepalive();
     // Background restarted / extension reloaded: in-flight chunks can be retried.
     for (const c of chunks.values()) {
-      if (c.state === 'busy') {
-        busy--;
+      if (c.state === 'checking' || c.state === 'busy') {
+        if (c.state === 'busy') busy--;
         markError(c, {
           message: 'Connection to the extension background was lost',
-          details: 'The background script was restarted or the extension was reloaded while this chunk was being translated. Click Retry.',
+          details: 'The background script was restarted or the extension was reloaded while this chunk was being checked or translated. Click Retry.',
         });
       }
     }
@@ -111,7 +111,8 @@ function stopKeepalive(): void {
 
 function onPortMessage(msg: PortOut): void {
   const chunk = chunks.get(msg.chunkId);
-  if (!chunk || chunk.state !== 'busy') {
+  const expectedState = msg.type === 'memoryHit' || msg.type === 'memoryMiss' ? 'checking' : 'busy';
+  if (!chunk || (chunk.state !== expectedState && !(msg.type === 'error' && chunk.state === 'checking'))) {
     if (cfg?.textDiagnostics) {
       logTextDiagnostic('ignored chunk response', {
         chunkId: msg.chunkId,
@@ -122,15 +123,26 @@ function onPortMessage(msg: PortOut): void {
     }
     return;
   }
+  if (msg.type === 'memoryMiss') {
+    chunk.state = 'queued';
+    setClasses(chunk);
+    queue.push(chunk.id);
+    if (cfg?.textDiagnostics) logTextDiagnostic('translation memory miss', { chunkId: chunk.id, segmentIds: chunk.segIds });
+    pump();
+    return;
+  }
+  const wasBusy = chunk.state === 'busy';
   if (cfg?.textDiagnostics) {
-    logTextDiagnostic(msg.type === 'result' ? 'chunk result received' : 'chunk error received', {
+    logTextDiagnostic(msg.type === 'result' || msg.type === 'memoryHit' ? 'chunk result received' : 'chunk error received', {
       chunkId: msg.chunkId,
       segmentIds: chunk.segIds,
-      ...(msg.type === 'result' ? { translationIds: Object.keys(msg.translations) } : { error: msg.error.message }),
+      ...(msg.type === 'result' || msg.type === 'memoryHit'
+        ? { translationIds: Object.keys(msg.translations), source: msg.type === 'memoryHit' ? 'memory' : 'provider' }
+        : { error: msg.error.message }),
     });
   }
-  busy--;
-  if (msg.type === 'result') {
+  if (wasBusy) busy--;
+  if (msg.type === 'result' || msg.type === 'memoryHit') {
     const inputGroupsToUpdate = new Set<InputGroup>();
     for (const id of chunk.segIds) {
       const seg = segs.get(id);
@@ -231,10 +243,40 @@ function attachBadge(c: Chunk, badge: HTMLElement): void {
 
 function enqueue(c: Chunk): void {
   clearBadge(c);
-  c.state = 'queued';
+  c.state = 'checking';
   setClasses(c);
-  queue.push(c.id);
-  pump();
+  checkMemory(c);
+}
+
+function checkMemory(c: Chunk): void {
+  const list = chunkSegs(c);
+  if (!list.length) {
+    c.state = 'done';
+    if (cfg?.textDiagnostics) {
+      logTextDiagnostic('chunk not checked', {
+        chunkId: c.id,
+        segmentIds: c.segIds,
+        reason: 'no connected segments remain',
+      });
+    }
+    return;
+  }
+  const segments: SegmentPayload[] = list.map((s) => ({ id: s.id, text: s.raw }));
+  if (cfg?.textDiagnostics) {
+    logTextDiagnostic('translation memory preflight', {
+      chunkId: c.id,
+      segmentIds: c.segIds,
+      segmentCount: segments.length,
+    });
+  }
+  try {
+    post({ type: 'checkMemory', chunkId: c.id, segments });
+  } catch (e) {
+    markError(c, {
+      message: 'Cannot reach the extension background',
+      details: `${String(e)}\n\nIf the extension was reloaded or updated, reload this page.`,
+    });
+  }
 }
 
 function inViewport(c: Chunk): boolean {
@@ -528,7 +570,7 @@ function status(): PageStatus {
     s.total++;
     if (c.state === 'done') s.done++;
     else if (c.state === 'busy') s.busy++;
-    else if (c.state === 'queued') s.queued++;
+    else if (c.state === 'queued' || c.state === 'checking') s.queued++;
     else if (c.state === 'error') s.errors++;
     else if (c.state === 'oversized') s.oversized++;
   }

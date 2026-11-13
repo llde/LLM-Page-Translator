@@ -168,9 +168,9 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
       inflight.delete(msg.chunkId);
       return;
     }
-    if (msg.type === 'translate') {
+    if (msg.type === 'translate' || msg.type === 'checkMemory') {
       const ctl = new AbortController();
-      inflight.set(msg.chunkId, ctl);
+      if (msg.type === 'translate') inflight.set(msg.chunkId, ctl);
       let diagnosticsEnabled = false;
       try {
         const cfg = await getSettings(tabId, port.sender?.tab?.url);
@@ -189,46 +189,49 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
         }
         const memoryContext: TranslationMemoryContext | undefined =
           pageUrl && frameUrlAncestry ? { pageUrl, frameUrlAncestry } : undefined;
-        const cached = memoryContext ? await getTranslationMemory(memoryContext, cfg, msg.segments) : undefined;
-        let translations: Record<number, string>;
-        if (cached) {
-          translations = cached;
-          if (cfg.textDiagnostics) {
-            console.info('[LLM Page Translator] translation memory hit', {
-              chunkId: msg.chunkId,
-              segmentIds: msg.segments.map((segment) => segment.id),
-              frameId,
-            });
-          }
-        } else {
-          if (memoryContext && cfg.textDiagnostics) {
-            console.info('[LLM Page Translator] translation memory miss', {
-              chunkId: msg.chunkId,
-              segmentCount: msg.segments.length,
-              frameId,
-            });
-          }
-          if (cfg.textDiagnostics) {
-            console.info('[LLM Page Translator] backend request received', {
-              chunkId: msg.chunkId,
-              segmentIds: msg.segments.map((segment) => segment.id),
-              segmentCount: msg.segments.length,
-            });
-          }
-          translations = await translate(cfg, msg.segments, ctl.signal);
-          if (!ctl.signal.aborted && memoryContext) {
-            await setTranslationMemory(memoryContext, cfg, msg.segments, translations);
+        if (msg.type === 'checkMemory') {
+          const cached = memoryContext ? await getTranslationMemory(memoryContext, cfg, msg.segments) : undefined;
+          if (cached) {
             if (cfg.textDiagnostics) {
-              console.info('[LLM Page Translator] translation memory stored', {
+              console.info('[LLM Page Translator] translation memory hit', {
+                chunkId: msg.chunkId,
+                segmentIds: msg.segments.map((segment) => segment.id),
+                frameId,
+              });
+            }
+            send({ type: 'memoryHit', chunkId: msg.chunkId, translations: cached });
+          } else {
+            if (memoryContext && cfg.textDiagnostics) {
+              console.info('[LLM Page Translator] translation memory miss', {
                 chunkId: msg.chunkId,
                 segmentCount: msg.segments.length,
                 frameId,
               });
             }
+            send({ type: 'memoryMiss', chunkId: msg.chunkId });
+          }
+          return;
+        }
+        if (cfg.textDiagnostics) {
+          console.info('[LLM Page Translator] backend request received', {
+            chunkId: msg.chunkId,
+            segmentIds: msg.segments.map((segment) => segment.id),
+            segmentCount: msg.segments.length,
+          });
+        }
+        const translations = await translate(cfg, msg.segments, ctl.signal);
+        if (!ctl.signal.aborted && memoryContext) {
+          await setTranslationMemory(memoryContext, cfg, msg.segments, translations);
+          if (cfg.textDiagnostics) {
+            console.info('[LLM Page Translator] translation memory stored', {
+              chunkId: msg.chunkId,
+              segmentCount: msg.segments.length,
+              frameId,
+            });
           }
         }
         if (!ctl.signal.aborted) {
-          if (cfg.textDiagnostics && !cached) {
+          if (cfg.textDiagnostics) {
             console.info('[LLM Page Translator] backend translation completed', {
               chunkId: msg.chunkId,
               translationIds: Object.keys(translations),
@@ -245,7 +248,7 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
           send({ type: 'error', chunkId: msg.chunkId, error });
         }
       } finally {
-        inflight.delete(msg.chunkId);
+        if (msg.type === 'translate') inflight.delete(msg.chunkId);
       }
     }
   });
