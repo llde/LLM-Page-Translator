@@ -16,7 +16,7 @@ LLM served by **Ollama**, **OpenWebUI** or any **OpenAI-compatible** API.
   (raises the limit for that chunk only) or **Split** it (at `, ; :`, then at words).
 - Text added or changed later (infinite scroll, SPA updates) is translated too (can be disabled); only affected nodes and added subtrees are rescanned.
 - The optional **Keep numbers unchanged and use them as chunk separators** setting avoids sending numbers for translation and lets surrounding text reuse memory when numbers change. It also splits numbers inside words and may reduce translation context.
-- While translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. Different text or markup is applied normally.
+- While translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. For translated `innerHTML`, unchanged letters and markup also preserve the translation while safely matched numbers are updated in place; other punctuation changes are ignored. Changed markup or ambiguous numeric updates are applied normally and retranslated.
 - The optional **Experimental: ignore textContent updates from string slices** setting applies sliced text but excludes its mutation from dynamic translation. It changes `String.prototype.slice()` to return objects while translating and can break page scripts, including string method calls, strict equality and empty-string checks. Wrapper detection uses constructor names, so similarly named page objects can be mistaken for wrappers. It is disabled by default.
 
 ## Build

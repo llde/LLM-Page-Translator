@@ -53,6 +53,7 @@ const frameServer = http.createServer((req, res) => {
   res.writeHead(200, { 'Content-Type': 'text/html' });
   res.end(`<!doctype html><html><body>
 <p id="cross-origin-text">Cross-origin boundary phrase.</p>
+<p id="cross-origin-number">Frame count 6 items.</p>
 <iframe id="nested-frame" srcdoc="<p id='nested-frame-text'>Nested child boundary phrase.</p>"></iframe>
 </body></html>`);
 });
@@ -66,7 +67,7 @@ const server = http.createServer((req, res) => {
   if (req.method === 'GET') {
     res.writeHead(200, { 'Content-Type': 'text/html' });
     return res.end(req.url === '/iframe-test' ? FRAME_PAGE
-      : req.url === '/numbers-test' || req.url === '/mutation-target-test' ? '<!doctype html><html><body></body></html>'
+      : req.url === '/numbers-test' || req.url === '/mutation-target-test' || req.url.startsWith('/html-number-test') ? '<!doctype html><html><body></body></html>'
         : PAGE);
   }
   let body = '';
@@ -90,7 +91,7 @@ const server = http.createServer((req, res) => {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         return res.end(JSON.stringify({ error: 'mock model exploded' }));
       }
-      const out = segs.map(([id, t]) => `[${id}] IT:${t}`).join('\n');
+      const out = segs.map(([id, t]) => `[${id}] IT:${t === 'Ambiguous 6 units.' ? 'Ambiguous units.' : t}`).join('\n');
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ message: { role: 'assistant', content: `<think>hmm</think><translated_text>\n${out}\n</translated_text>` }, done_reason: 'stop' }));
     }, user.includes('PREFLIGHT-MISS') ? 2000 : 700);
@@ -497,6 +498,15 @@ try {
     frameStatus.status.active && frameStatus.status.done === frameStatus.status.total,
     `aggregated frame status ${JSON.stringify(frameStatus.status)}`,
   );
+  const frameNumberRequestCount = requests.length;
+  const frameNumberUpdated = await framePage.frameLocator('#cross-origin-frame').locator('#cross-origin-number').evaluate((element) => {
+    const child = element.firstChild;
+    element.innerHTML = 'Frame count 7 items.';
+    return element.firstChild === child && element.textContent.includes('IT:') && element.textContent.includes('7');
+  });
+  check(frameNumberUpdated, 'iframe numeric HTML updates preserve translated nodes');
+  await framePage.waitForTimeout(1000);
+  check(requests.length === frameNumberRequestCount, 'iframe numeric HTML updates do not request translation');
   const frameRestore = await frameTabMessage({ type: 'restore' });
   check(!frameRestore.error, 'restore reaches all responding frames');
   check(
@@ -504,6 +514,11 @@ try {
       (await framePage.frameLocator('#blank-frame').locator('#blank-frame-text').innerText()) === 'Blank child boundary phrase.',
     'iframe restore returns original text',
   );
+  check((await framePage.frameLocator('#cross-origin-frame').locator('#cross-origin-number').innerText()) === 'Frame count 7 items.',
+    'iframe restore retains updated numeric originals');
+  await framePage.frameLocator('#cross-origin-frame').locator('#cross-origin-number').evaluate((element) => {
+    element.textContent = 'Frame count 6 items.';
+  });
   const frameCacheRequestCount = requests.length;
   await frameTabMessage({ type: 'start' });
   await framePage.waitForTimeout(1000);
@@ -757,6 +772,132 @@ try {
   });
   check(afterRestore, 'restore returns page setters to normal behavior');
   await setterPage.close();
+
+  for (const separateNumbers of [false, true]) {
+    await sw.evaluate(async (separate) => {
+      const { settings } = await chrome.storage.local.get('settings');
+      await chrome.storage.local.set({ settings: { ...settings, separateNumbers: separate, experimentalSliceGuard: false } });
+    }, separateNumbers);
+    const htmlPage = await ctx.newPage();
+    htmlPage.on('pageerror', (e) => errors.push(String(e)));
+    const htmlUrl = `http://127.0.0.1:${PORT}/html-number-test?separate=${separateNumbers}`;
+    await htmlPage.goto(htmlUrl);
+    await htmlPage.evaluate((separate) => {
+      document.body.innerHTML = `
+        <p id="html-single">Total: -12.5 items.</p>
+        <p id="html-nested">Status <a href="/one">Count 2</a><i>8</i> end.</p>
+        <p id="html-punctuation">Greetings, world.</p>
+        <p id="html-pending">Pending 11 items.</p>
+        <p id="html-duplicates">Repeated 3 and 3 items.</p>
+        <p id="html-restored">Remaining <b>20</b> items.</p>
+        ${separate ? '' : '<p id="html-ambiguous">Ambiguous 6 units.</p>'}
+      `;
+    }, separateNumbers);
+    const htmlTabMsg = (msg) => sw.evaluate(async ({ m, url }) => {
+      const [tab] = await chrome.tabs.query({ url });
+      return chrome.tabs.sendMessage(tab.id, m, { frameId: 0 });
+    }, { m: msg, url: htmlUrl });
+    await htmlPage.waitForTimeout(500);
+    await htmlTabMsg({ type: 'start' });
+    const pendingReplaced = await htmlPage.locator('#html-pending').evaluate((element) => {
+      const oldChild = element.firstChild;
+      element.innerHTML = 'Pending 12 items.';
+      return element.firstChild !== oldChild;
+    });
+    check(pendingReplaced, `incomplete translation applies the incoming HTML (separateNumbers=${separateNumbers})`);
+    await htmlPage.waitForFunction((separate) =>
+      document.querySelector('#html-single')?.textContent?.includes('IT:') &&
+      document.querySelector('#html-nested a')?.textContent?.includes('IT:') &&
+      document.querySelector('#html-punctuation')?.textContent?.includes('IT:') &&
+      document.querySelector('#html-pending')?.textContent?.includes('12') &&
+      document.querySelector('#html-duplicates')?.textContent?.includes('IT:') &&
+      document.querySelector('#html-restored')?.textContent?.includes('IT:') &&
+      (separate || document.querySelector('#html-ambiguous')?.textContent?.includes('IT:Ambiguous units.')),
+      separateNumbers, { timeout: 15000 });
+    await htmlPage.waitForTimeout(1000);
+    const htmlRequestStart = requests.length;
+    const htmlChecks = await htmlPage.evaluate(() => {
+      const single = document.querySelector('#html-single');
+      const singleChild = single.firstChild;
+      single.innerHTML = "Total: +1'400,5 items.";
+      const singleUpdated = single.firstChild === singleChild && single.textContent.includes('IT:') && single.textContent.includes("+1'400,5");
+      single.textContent = "Total: +1'400,5 items.";
+      const updatedOriginalMatches = single.firstChild === singleChild && single.textContent.includes('IT:');
+      const nested = document.querySelector('#html-nested');
+      const link = nested.querySelector('a');
+      const numberOnly = nested.querySelector('i');
+      nested.innerHTML = 'Status <a href="/one">Count 9</a><i>15</i> end.';
+      const firstUpdate = nested.querySelector('a') === link && link.textContent.includes('IT:') && link.textContent.includes('9') &&
+        nested.querySelector('i') === numberOnly && numberOnly.textContent === '15';
+      nested.innerHTML = 'Status <a href="/one">Count 10</a><i>16</i> end!';
+      const secondUpdate = nested.querySelector('a') === link && link.textContent.includes('IT:') && link.textContent.includes('10') &&
+        nested.querySelector('i') === numberOnly && numberOnly.textContent === '16';
+      const punctuation = document.querySelector('#html-punctuation');
+      const before = punctuation.innerHTML;
+      punctuation.innerHTML = 'Greetings!!! world?';
+      const restored = document.querySelector('#html-restored');
+      const bold = restored.querySelector('b');
+      restored.innerHTML = 'Remaining <b>21</b> items.';
+      const numericChildUpdated = restored.querySelector('b') === bold && bold.textContent === '21';
+      return { singleUpdated, updatedOriginalMatches, firstUpdate, secondUpdate, numericChildUpdated, punctuationPreserved: punctuation.innerHTML === before };
+    });
+    await htmlPage.waitForTimeout(1200);
+    check(htmlChecks.singleUpdated, `formatted number update preserves translated nodes (separateNumbers=${separateNumbers})`);
+    check(htmlChecks.updatedOriginalMatches, `updated originals prevent equivalent textContent replacement (separateNumbers=${separateNumbers})`);
+    check(htmlChecks.firstUpdate && htmlChecks.secondUpdate, `nested repeated number updates preserve translated markup (separateNumbers=${separateNumbers})`);
+    check(htmlChecks.numericChildUpdated, `numeric-only child text updates in place (separateNumbers=${separateNumbers})`);
+    check(htmlChecks.punctuationPreserved, `nonalphabetic-only HTML changes preserve translated content (separateNumbers=${separateNumbers})`);
+    check(requests.length === htmlRequestStart, `number-only HTML updates do not request translation (separateNumbers=${separateNumbers})`);
+    if (!separateNumbers) {
+      const ambiguousReplaced = await htmlPage.locator('#html-ambiguous').evaluate((element) => {
+        const oldChild = element.firstChild;
+        element.innerHTML = 'Ambiguous 7 units.';
+        return element.firstChild !== oldChild;
+      });
+      check(ambiguousReplaced, 'ambiguous translated numbers apply the incoming HTML normally');
+      await htmlPage.waitForFunction(() => document.querySelector('#html-ambiguous')?.textContent?.includes('IT:Ambiguous 7 units.'), null, { timeout: 15000 });
+    }
+    const duplicateReplaced = await htmlPage.locator('#html-duplicates').evaluate((element) => {
+      const oldChild = element.firstChild;
+      element.innerHTML = 'Repeated 4 and 5 items.';
+      return element.firstChild !== oldChild;
+    });
+    check(duplicateReplaced, `ambiguous duplicate numbers apply the incoming HTML (separateNumbers=${separateNumbers})`);
+    const detachedUpdated = await htmlPage.locator('#html-single').evaluate((element) => {
+      const parent = element.parentNode;
+      const child = element.firstChild;
+      element.remove();
+      element.innerHTML = "Total: +1'500,5 items.";
+      const preserved = element.firstChild === child && element.textContent.includes('IT:') && element.textContent.includes("+1'500,5");
+      parent.appendChild(element);
+      return preserved;
+    });
+    check(detachedUpdated, `detached translated HTML preserves number updates (separateNumbers=${separateNumbers})`);
+    const changedMarkup = await htmlPage.locator('#html-nested').evaluate((element) => {
+      const oldLink = element.querySelector('a');
+      element.innerHTML = 'Status <a href="/two">Count 10</a><i>16</i> end.';
+      return element.querySelector('a') !== oldLink && element.querySelector('a').getAttribute('href') === '/two';
+    });
+    check(changedMarkup, `changed attributes apply normally (separateNumbers=${separateNumbers})`);
+    const changedTag = await htmlPage.locator('#html-nested').evaluate((element) => {
+      element.innerHTML = 'Status <strong>Count 10</strong><i>16</i> end.';
+      return !!element.querySelector('strong') && !element.querySelector('a');
+    });
+    check(changedTag, `changed tags apply normally (separateNumbers=${separateNumbers})`);
+    await htmlPage.waitForTimeout(2500);
+    const pendingText = await htmlPage.locator('#html-pending').textContent();
+    const duplicateText = await htmlPage.locator('#html-duplicates').textContent();
+    check(pendingText.includes('IT:') && pendingText.includes('12'),
+      `incomplete translation is retried for the incoming HTML (separateNumbers=${separateNumbers})`);
+    check(duplicateText.includes('IT:') && duplicateText.includes('4') && duplicateText.includes('5'),
+      `ambiguous numeric changes are retranslated (separateNumbers=${separateNumbers})`);
+    await htmlTabMsg({ type: 'restore' });
+    check((await htmlPage.locator('#html-single').textContent()) === "Total: +1'500,5 items.",
+      `restore retains updated original numbers (separateNumbers=${separateNumbers})`);
+    check((await htmlPage.locator('#html-restored').textContent()) === 'Remaining 21 items.',
+      `restore retains updated numeric-only child text (separateNumbers=${separateNumbers})`);
+    await htmlPage.close();
+  }
 
   const mutationPage = await ctx.newPage();
   mutationPage.on('pageerror', (e) => errors.push(String(e)));

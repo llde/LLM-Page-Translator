@@ -260,6 +260,157 @@ export function matchesOriginalInnerHTML(element: Element, value: string): boole
   return copy.innerHTML === original;
 }
 
+interface TranslatedSegment {
+  raw: string;
+  translation?: string;
+}
+
+const FORMATTED_NUMBER = /[+\-\u2212]?\p{N}+(?:[.,'\u2019\u066b\u066c\u00a0\u2009\u202f]\p{N}+)*/gu;
+
+function numberMatches(text: string): RegExpMatchArray[] {
+  return Array.from(text.matchAll(FORMATTED_NUMBER));
+}
+
+function replaceNumberParts(parts: string[], numbers: RegExpMatchArray[], replacements: string[]): string[] {
+  const result = [...parts];
+  const offsets: number[] = [];
+  let length = 0;
+  for (const part of parts) {
+    offsets.push(length);
+    length += part.length;
+  }
+  for (let n = numbers.length - 1; n >= 0; n--) {
+    const start = numbers[n].index!;
+    const end = start + numbers[n][0].length;
+    for (let i = parts.length - 1; i >= 0; i--) {
+      const from = Math.max(start, offsets[i]);
+      const to = Math.min(end, offsets[i] + parts[i].length);
+      if (from >= to) continue;
+      const localStart = from - offsets[i];
+      const localEnd = to - offsets[i];
+      result[i] = result[i].slice(0, localStart) +
+        (from === start ? replacements[n] : '') + result[i].slice(localEnd);
+    }
+  }
+  return result;
+}
+
+/**
+ * Preserve translated nodes only if all numeric substitutions can be mapped to
+ * the original and rendered text without guessing how the translation used them.
+ */
+export function preserveTranslatedInnerHTML(
+  element: Element,
+  value: string,
+  getSegment: (element: HTMLElement) => TranslatedSegment | undefined,
+): boolean {
+  if (originals.has(element as HTMLElement)) return false;
+  const inertDocument = document.implementation.createHTMLDocument('');
+  const incoming = inertDocument.importNode(element, false);
+  try {
+    incoming.innerHTML = value;
+  } catch (error) {
+    if (error instanceof TypeError || (error instanceof DOMException && error.name === 'SyntaxError')) return false;
+    throw error;
+  }
+  const updates: (() => void)[] = [];
+  let hasTranslation = false;
+
+  const compareText = (node: Node, replacement: string): boolean => {
+    const wrapper = node.nodeType === Node.ELEMENT_NODE && originals.has(node as HTMLElement)
+      ? node as HTMLElement : undefined;
+    const original = wrapper ? originals.get(wrapper)! : node.nodeValue ?? '';
+    if ((original.match(/\p{L}/gu) ?? []).join('') !== (replacement.match(/\p{L}/gu) ?? []).join('')) return false;
+    const oldNumbers = numberMatches(original);
+    const newNumbers = numberMatches(replacement);
+    if (oldNumbers.length !== newNumbers.length) return false;
+    const replacements = newNumbers.map((number) => number[0]);
+    const repeated = new Map<string, string>();
+    for (let i = 0; i < oldNumbers.length; i++) {
+      const old = oldNumbers[i][0];
+      if (repeated.has(old) && repeated.get(old) !== replacements[i]) return false;
+      repeated.set(old, replacements[i]);
+    }
+    if (!wrapper) {
+      if (/\p{L}/u.test(original) || node.nodeType !== Node.TEXT_NODE) return false;
+      const updated = replaceNumberParts([original], oldNumbers, replacements)[0];
+      if (updated !== original) updates.push(() => { node.nodeValue = updated; });
+      return true;
+    }
+
+    const rawParts: string[] = [];
+    const renderedParts: string[] = [];
+    const pieces: { text: Text; segment?: TranslatedSegment; element?: HTMLElement }[] = [];
+    for (const child of wrapper.childNodes) {
+      if (child.nodeType === Node.TEXT_NODE) {
+        rawParts.push(child.nodeValue ?? '');
+        renderedParts.push(child.nodeValue ?? '');
+        pieces.push({ text: child as Text });
+      } else if (child instanceof HTMLElement && child.classList.contains(SEG_CLASS)) {
+        const segment = getSegment(child);
+        if (!segment || segment.translation === undefined || child.childNodes.length !== 1 || !(child.firstChild instanceof Text)) return false;
+        const { lead, trail } = splitWhitespace(segment.raw);
+        if (child.textContent !== lead + segment.translation + trail || originals.get(child) !== segment.raw) return false;
+        rawParts.push(segment.raw);
+        renderedParts.push(child.textContent);
+        pieces.push({ text: child.firstChild, segment, element: child });
+        hasTranslation = true;
+      } else {
+        return false;
+      }
+    }
+    if (rawParts.join('') !== original) return false;
+    const renderedNumbers = numberMatches(renderedParts.join(''));
+    if (renderedNumbers.length !== oldNumbers.length ||
+      renderedNumbers.some((number, i) => number[0] !== oldNumbers[i][0])) return false;
+    const newRawParts = replaceNumberParts(rawParts, oldNumbers, replacements);
+    const newRenderedParts = replaceNumberParts(renderedParts, renderedNumbers, replacements);
+    const newTranslations: (string | undefined)[] = [];
+    for (let i = 0; i < pieces.length; i++) {
+      if (!pieces[i].segment) {
+        if (newRawParts[i] !== newRenderedParts[i]) return false;
+        newTranslations.push(undefined);
+        continue;
+      }
+      const { lead, trail } = splitWhitespace(newRawParts[i]);
+      const rendered = newRenderedParts[i];
+      if (!rendered.startsWith(lead) || !rendered.endsWith(trail) || rendered.length < lead.length + trail.length) return false;
+      newTranslations.push(rendered.slice(lead.length, rendered.length - trail.length));
+    }
+    updates.push(() => {
+      originals.set(wrapper, newRawParts.join(''));
+      pieces.forEach(({ text, segment, element: span }, i) => {
+        if (text.data !== newRenderedParts[i]) text.data = newRenderedParts[i];
+        if (segment && span) {
+          segment.raw = newRawParts[i];
+          segment.translation = newTranslations[i];
+          originals.set(span, segment.raw);
+          span.title = splitWhitespace(segment.raw).core;
+        }
+      });
+    });
+    return true;
+  };
+
+  const compareChildren = (oldParent: Node, newParent: Node): boolean => {
+    const oldChildren = Array.from(oldParent.childNodes);
+    const newChildren = Array.from(newParent.childNodes);
+    if (oldChildren.length !== newChildren.length) return false;
+    return oldChildren.every((oldChild, i) => {
+      const newChild = newChildren[i];
+      if (oldChild.nodeType === Node.TEXT_NODE || (oldChild.nodeType === Node.ELEMENT_NODE && originals.has(oldChild as HTMLElement))) {
+        return newChild.nodeType === Node.TEXT_NODE && compareText(oldChild, newChild.nodeValue ?? '');
+      }
+      if (oldChild.nodeType !== newChild.nodeType || !oldChild.cloneNode(false).isEqualNode(newChild.cloneNode(false))) return false;
+      return compareChildren(oldChild, newChild);
+    });
+  };
+
+  if (!compareChildren(element, incoming) || !hasTranslation) return false;
+  updates.forEach((update) => update());
+  return true;
+}
+
 /** Split a raw phrase into leading whitespace, core text and trailing whitespace. */
 export function splitWhitespace(raw: string): { lead: string; core: string; trail: string } {
   const m = /^(\s*)([\s\S]*?)(\s*)$/.exec(raw)!;

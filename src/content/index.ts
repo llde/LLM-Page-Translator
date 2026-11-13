@@ -14,7 +14,7 @@ import {
 } from '../shared/types';
 import { createBadge } from './badge';
 import { analyzeMutationBatch, diagnosticMutation, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
-import { createSegSpan, isOwnNode, matchesOriginalInnerHTML, originalTextContent, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
+import { createSegSpan, isOwnNode, matchesOriginalInnerHTML, originalTextContent, preserveTranslatedInnerHTML, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
 type ChunkState = 'checking' | 'queued' | 'busy' | 'done' | 'error' | 'oversized';
@@ -68,7 +68,11 @@ function setterMatches(target: Node, type: string, value: string): boolean {
   if (type === 'llm-page-translator:check-text-content' || type === 'llm-page-translator:detached-text') {
     return originalTextContent(target) === value;
   }
-  return target instanceof Element && matchesOriginalInnerHTML(target, value);
+  return target instanceof Element && (matchesOriginalInnerHTML(target, value) ||
+    preserveTranslatedInnerHTML(target, value, (element) => {
+      const seg = segs.get(Number(element.dataset.xtId));
+      return seg?.element === element ? seg : undefined;
+    }));
 }
 
 function checkSetter(event: Event): void {
@@ -206,6 +210,7 @@ function onPortMessage(msg: PortOut): void {
         seg.translation = msg.translations[id] ?? core;
         inputGroupsToUpdate.add(seg.inputGroup);
       } else {
+        seg.translation = Object.hasOwn(msg.translations, id) ? msg.translations[id] : undefined;
         seg.element.textContent = lead + (msg.translations[id] ?? core) + trail;
         seg.element.title = core;
       }
