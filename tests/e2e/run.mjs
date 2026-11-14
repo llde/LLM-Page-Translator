@@ -229,6 +229,54 @@ try {
       mutation.removedNodes.some((node) => node.path.includes('div#observer-probe'))),
     'observer diagnostics identify removed nodes, including ignored-only removals',
   );
+  await page.evaluate(() => {
+    for (const id of ['filter-target', 'filter-other']) {
+      const element = document.createElement('div');
+      element.id = id;
+      document.body.append(element);
+    }
+  });
+  await page.waitForTimeout(100);
+  await tabMsg({ type: 'setMutationDiagnosticFilter', filter: 'nEeDlE' });
+  const filteredSummaryStart = observerSummaries.length;
+  await page.evaluate(() => {
+    document.querySelector('#filter-target').textContent = `${'a'.repeat(120)} Needle phrase.`;
+    document.querySelector('#filter-other').textContent = 'Unrelated filter phrase.';
+  });
+  await page.waitForTimeout(100);
+  await page.evaluate(() => document.querySelector('#filter-target').replaceChildren());
+  await page.waitForFunction(() => document.querySelector('#filter-other')?.textContent?.includes('IT:Unrelated filter phrase.'), null, { timeout: 15000 });
+  const filteredMutations = observerSummaries.slice(filteredSummaryStart).flatMap((summary) => summary.mutations ?? []);
+  check(filteredMutations.some((mutation) => mutation.addedNodes.some((node) => node.path.includes('#filter-target'))) &&
+    filteredMutations.some((mutation) => mutation.removedNodes.some((node) => node.path.includes('#filter-target'))),
+    'mutation filter matches full added and removed text case-insensitively');
+  check(!filteredMutations.some((mutation) => mutation.target.path.includes('#filter-other')),
+    'mutation filter excludes unrelated records from the same batch');
+  check((await page.locator('#filter-other').textContent()).includes('IT:Unrelated filter phrase.'),
+    'mutation diagnostic filtering does not affect translation');
+  await tabMsg({ type: 'setMutationDiagnosticFilter', filter: '#FILTER-OTHER' });
+  const pathSummaryStart = observerSummaries.length;
+  await page.evaluate(() => {
+    document.querySelector('#filter-other').textContent = 'Path matching phrase.';
+    document.querySelector('#filter-target').textContent = 'Different target phrase.';
+  });
+  await page.waitForTimeout(100);
+  const pathMutations = observerSummaries.slice(pathSummaryStart).flatMap((summary) => summary.mutations ?? []);
+  check(pathMutations.some((mutation) => mutation.target.path.includes('#filter-other')) &&
+    !pathMutations.some((mutation) => mutation.target.path.includes('#filter-target')),
+    'mutation filter matches node paths case-insensitively');
+  await tabMsg({ type: 'setMutationDiagnosticFilter', filter: '' });
+  const clearedSummaryStart = observerSummaries.length;
+  await page.evaluate(() => { document.querySelector('#filter-other').textContent = 'Unfiltered phrase.'; });
+  await page.waitForTimeout(100);
+  check(observerSummaries.slice(clearedSummaryStart).some((summary) =>
+    summary.mutations.some((mutation) => mutation.target.path.includes('#filter-other'))),
+    'clearing the mutation filter restores unfiltered logging');
+  await page.waitForFunction(() => document.querySelector('#filter-other')?.textContent?.includes('IT:Unfiltered phrase.'), null, { timeout: 15000 });
+  await page.evaluate(() => {
+    document.querySelector('#filter-target').remove();
+    document.querySelector('#filter-other').remove();
+  });
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend request received')), 'enabled diagnostics log backend request receipt');
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend translation completed')), 'enabled diagnostics log backend translation completion');
   check(backgroundDiagnostics.some((line) => line.includes('[LLM Page Translator] backend translation failed')), 'enabled diagnostics log backend translation failures');
@@ -565,6 +613,9 @@ try {
       const hasClearMemoryButton = (await clearMemoryButton.count()) === 1;
       check(hasClearMemoryButton, 'popup exposes a page memory clear button');
       check((await pg.locator('#textDiagnostics').count()) === 1, 'popup exposes per-tab text diagnostics toggle');
+      const filterField = pg.locator('#mutationDiagnosticFilter');
+      const hasFilterField = (await filterField.count()) === 1;
+      check(hasFilterField, 'popup exposes a mutation diagnostic filter');
       if (hasClearMemoryButton) {
         const popupTabId = await sw.evaluate(async () =>
           (await chrome.tabs.query({ active: true, currentWindow: true }))[0]?.id,
@@ -613,6 +664,20 @@ try {
         return Object.values(all).find((v) => v && v.textDiagnostics);
       });
       check(diagnosticsSettings?.textDiagnostics === true, 'popup persists diagnostics toggle for this tab');
+      if (hasFilterField) {
+        await filterField.fill('popup filter');
+        await pg.waitForTimeout(500);
+        const filterSettings = await sw.evaluate(async () => {
+          const all = await chrome.storage.session.get(null);
+          return Object.values(all).find((v) => v?.mutationDiagnosticFilter === 'popup filter');
+        });
+        check(filterSettings?.mutationDiagnosticFilter === 'popup filter', 'popup persists the per-tab mutation diagnostic filter');
+        await pg.reload();
+        await pg.waitForTimeout(500);
+        check((await filterField.inputValue()) === 'popup filter', 'popup reload restores the per-tab mutation diagnostic filter');
+        await filterField.fill('');
+        await pg.waitForTimeout(500);
+      }
       const opts = await pg.locator('#model option').allTextContents();
       check(JSON.stringify(opts) === JSON.stringify(['(global: mock)', 'mock', 'other']), `popup model list: ${JSON.stringify(opts)}`);
       const src = await pg.locator('#sourceLanguage option').allTextContents();
@@ -627,28 +692,51 @@ try {
         return Object.values(all).find((v) => v && v.sourceLanguage);
       });
       check(saved?.sourceLanguage === 'German' && saved?.targetLanguage === 'French', `tab languages saved: ${JSON.stringify(saved)}`);
-      const overrides = ['separateNumbers', 'experimentalSliceGuard', 'experimentalCachedTextContent'];
-      const hasOverrides = (await Promise.all(overrides.map((id) => pg.locator(`#${id}`).count()))).every((count) => count === 1);
-      check(hasOverrides, 'popup exposes all three per-tab page behavior overrides');
-      if (hasOverrides) {
+      const overrides = ['separateNumbers', 'enableSetterHooks', 'experimentalSliceGuard', 'experimentalCachedTextContent'];
+      const hasCheckboxOverrides = (await Promise.all(overrides.map(async (id) => {
+        const field = pg.locator(`#${id}`);
+        return (await field.count()) === 1 && (await field.getAttribute('type')) === 'checkbox';
+      }))).every(Boolean);
+      check(hasCheckboxOverrides, 'popup exposes boolean page overrides as checkboxes');
+      if (hasCheckboxOverrides) {
         await pg.locator('details > summary').click();
         const hookOption = pg.locator('#enableSetterHooks');
-        const hasHookOption = (await hookOption.count()) === 1;
-        check(hasHookOption, 'popup exposes a per-tab setter hook override');
-        if (hasHookOption) {
-          await hookOption.selectOption('false');
-          check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
-            await pg.locator('#experimentalCachedTextContent').isDisabled() &&
-            !(await pg.locator('#separateNumbers').isDisabled()),
-          'popup disables hook-dependent options but not number separation');
-          await hookOption.selectOption('true');
-          check(!(await pg.locator('#experimentalSliceGuard').isDisabled()) &&
-            !(await pg.locator('#experimentalCachedTextContent').isDisabled()),
-          'popup re-enables hook-dependent controls');
-        }
-        await pg.locator('#separateNumbers').selectOption('true');
-        await pg.locator('#experimentalSliceGuard').selectOption('false');
-        await pg.locator('#experimentalCachedTextContent').selectOption('true');
+        const inheritedValues = await Promise.all(overrides.map((id) => pg.locator(`#${id}`).isChecked()));
+        check(JSON.stringify(inheritedValues) === JSON.stringify([false, true, false, false]),
+          'untouched popup checkboxes reflect global defaults');
+        const inheritedTab = await sw.evaluate(async () => {
+          const all = await chrome.storage.session.get(null);
+          return Object.values(all).find((value) => value?.sourceLanguage === 'German');
+        });
+        check(overrides.every((id) => inheritedTab?.[id] === undefined),
+          'saving unrelated popup settings does not create boolean overrides');
+        await sw.evaluate(async () => {
+          const { settings } = await chrome.storage.local.get('settings');
+          await chrome.storage.local.set({ settings: { ...settings, separateNumbers: true } });
+        });
+        await pg.reload();
+        await pg.waitForFunction(() => document.querySelector('#separateNumbers')?.checked === true);
+        check(await pg.locator('#separateNumbers').isChecked(), 'untouched checkbox follows a changed global default');
+        await sw.evaluate(async () => {
+          const { settings } = await chrome.storage.local.get('settings');
+          await chrome.storage.local.set({ settings: { ...settings, separateNumbers: false } });
+        });
+        await pg.reload();
+        await pg.waitForFunction(() => document.querySelector('#enableSetterHooks')?.checked === true);
+        await pg.locator('details > summary').click();
+        await hookOption.uncheck();
+        check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
+          await pg.locator('#experimentalCachedTextContent').isDisabled() &&
+          !(await pg.locator('#separateNumbers').isDisabled()),
+        'popup disables hook-dependent options but not number separation');
+        await hookOption.check();
+        check(!(await pg.locator('#experimentalSliceGuard').isDisabled()) &&
+          !(await pg.locator('#experimentalCachedTextContent').isDisabled()),
+        'popup re-enables hook-dependent controls');
+        await pg.locator('#separateNumbers').check();
+        await pg.locator('#experimentalSliceGuard').check();
+        await pg.locator('#experimentalSliceGuard').uncheck();
+        await pg.locator('#experimentalCachedTextContent').check();
         await pg.waitForTimeout(600);
         const perTab = await sw.evaluate(async () => {
           const all = await chrome.storage.session.get(null);
@@ -657,29 +745,29 @@ try {
         check(perTab?.separateNumbers === true && perTab?.experimentalSliceGuard === false &&
           perTab?.experimentalCachedTextContent === true, 'popup saves true and false overrides for the current tab');
         await pg.reload();
-        await pg.waitForFunction(() => document.querySelector('#experimentalCachedTextContent')?.value === 'true');
-        check((await pg.locator('#separateNumbers').inputValue()) === 'true' &&
-          (await pg.locator('#experimentalSliceGuard').inputValue()) === 'false' &&
-          (!hasHookOption || (await hookOption.inputValue()) === 'true'),
+        await pg.waitForFunction(() => document.querySelector('#experimentalCachedTextContent')?.checked === true);
+        check(await pg.locator('#separateNumbers').isChecked() &&
+          !(await pg.locator('#experimentalSliceGuard').isChecked()) &&
+          await hookOption.isChecked(),
         'popup reload preserves per-tab behavior overrides');
         await pg.locator('details > summary').click();
-        if (hasHookOption) {
-          await hookOption.selectOption('false');
-          await pg.waitForTimeout(600);
-          await pg.reload();
-          await pg.waitForFunction(() => document.querySelector('#enableSetterHooks')?.value === 'false');
-          check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
-            await pg.locator('#experimentalCachedTextContent').isDisabled() &&
-            (await pg.locator('#experimentalSliceGuard').inputValue()) === 'false' &&
-            (await pg.locator('#experimentalCachedTextContent').inputValue()) === 'true',
-          'popup preserves disabled dependent overrides across reload');
-          await pg.locator('details > summary').click();
-        }
+        await hookOption.uncheck();
+        await pg.waitForTimeout(600);
+        await pg.reload();
+        await pg.waitForFunction(() =>
+          document.querySelector('#enableSetterHooks')?.checked === false &&
+          document.querySelector('#experimentalCachedTextContent')?.checked === true &&
+          document.querySelector('#experimentalCachedTextContent')?.disabled === true);
+        check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
+          await pg.locator('#experimentalCachedTextContent').isDisabled() &&
+          !(await pg.locator('#experimentalSliceGuard').isChecked()) &&
+          await pg.locator('#experimentalCachedTextContent').isChecked(),
+        'popup preserves disabled dependent overrides across reload');
+        await pg.locator('details > summary').click();
         const beforeReset = await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
         await pg.locator('#resetTab').click();
-        check((await pg.locator('#separateNumbers').inputValue()) === '' &&
-          (await pg.locator('#experimentalSliceGuard').inputValue()) === '' &&
-          (await pg.locator('#experimentalCachedTextContent').inputValue()) === '',
+        const resetValues = await Promise.all(overrides.map((id) => pg.locator(`#${id}`).isChecked()));
+        check(JSON.stringify(resetValues) === JSON.stringify([false, true, false, false]),
         'resetting tab overrides restores inherited behavior settings');
         const afterReset = await sw.evaluate(async () => {
           const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
@@ -1454,15 +1542,25 @@ try {
   const mutationPage = await ctx.newPage();
   mutationPage.on('pageerror', (e) => errors.push(String(e)));
   const mutationScanRoots = [];
+  const mutationObserverSummaries = [];
   mutationPage.on('console', async (message) => {
     if (message.text().includes('[LLM Page Translator] scan started')) {
       mutationScanRoots.push((await message.args()[1].jsonValue()).root);
+    } else if (message.text().includes('[LLM Page Translator] mutation observer')) {
+      mutationObserverSummaries.push(await message.args()[1].jsonValue());
     }
   });
   await mutationPage.goto(`http://127.0.0.1:${PORT}/mutation-target-test`);
   await mutationPage.evaluate(() => {
     document.body.innerHTML = `
+      <style>.visibility-closed { visibility: hidden; } .display-closed { display: none; }</style>
       <p id="previously-hidden" style="display:none">Previously hidden unrelated phrase.</p>
+      <div id="class-hidden" class="display-closed"><span>Class revealed nested phrase.</span><span id="still-hidden" hidden>Later revealed phrase.</span></div>
+      <div id="visibility-hidden" class="visibility-closed"><span>Visibility revealed phrase.</span></div>
+      <div id="attribute-hidden" hidden><span>Hidden attribute revealed phrase.</span></div>
+      <form id="hidden-input-form" hidden><input id="hidden-input" value="Revealed input phrase."></form>
+      <div id="mixed-visibility"><span id="already-visible">Already translated phrase.</span><span id="mixed-hidden" hidden>Newly revealed phrase.</span></div>
+      <div id="diagnostic-match"></div><div id="diagnostic-other"></div>
       <p id="changed-first"></p><p id="changed-second"></p>
       <div id="excluded-parent" translate="no"></div>
       <div id="hidden-parent" style="display:none"></div>
@@ -1479,15 +1577,45 @@ try {
   }, msg);
   await sw.evaluate(async () => {
     const [tab] = await chrome.tabs.query({ url: 'http://127.0.0.1:8765/mutation-target-test' });
-    await chrome.storage.session.set({ [`tab:${tab.id}`]: { textDiagnostics: true } });
+    await chrome.storage.session.set({ [`tab:${tab.id}`]: { textDiagnostics: true, mutationDiagnosticFilter: '#DIAGNOSTIC-MATCH' } });
   });
   await mutationPage.waitForTimeout(500);
   await mutationTabMsg({ type: 'start' });
-  await mutationPage.waitForTimeout(100);
+  await mutationPage.waitForFunction(() => document.querySelector('#already-visible')?.textContent?.includes('IT:Already translated phrase.'), null, { timeout: 15000 });
+  const persistedFilterStart = mutationObserverSummaries.length;
+  await mutationPage.evaluate(() => {
+    document.querySelector('#diagnostic-match').textContent = 'Persisted filter matching phrase.';
+    document.querySelector('#diagnostic-other').textContent = 'Persisted filter other phrase.';
+  });
+  await mutationPage.waitForFunction(() =>
+    document.querySelector('#diagnostic-match')?.textContent?.includes('IT:Persisted filter matching phrase.') &&
+    document.querySelector('#diagnostic-other')?.textContent?.includes('IT:Persisted filter other phrase.'),
+  null, { timeout: 15000 });
+  const persistedMutations = mutationObserverSummaries.slice(persistedFilterStart).flatMap((summary) => summary.mutations ?? []);
+  check(persistedMutations.some((mutation) => mutation.target.path.includes('#diagnostic-match')) &&
+    !persistedMutations.some((mutation) => mutation.target.path.includes('#diagnostic-other')),
+    'stored mutation filter applies when translation starts without filtering translation');
+  await mutationPage.waitForTimeout(150);
+  const unmatchedStart = mutationObserverSummaries.length;
+  await mutationPage.evaluate(() => { document.querySelector('#diagnostic-other').textContent = 'No matching diagnostic phrase.'; });
+  await mutationPage.waitForTimeout(150);
+  check(mutationObserverSummaries.length === unmatchedStart, 'nonmatching mutation batches produce no observer diagnostic');
+  await mutationTabMsg({ type: 'setMutationDiagnosticFilter', filter: '' });
+  await mutationPage.evaluate(() => {
+    document.querySelector('#diagnostic-match').remove();
+    document.querySelector('#diagnostic-other').remove();
+  });
+  await mutationPage.waitForTimeout(700);
   mutationScanRoots.length = 0;
   const mutationRequestStart = requests.length;
   await mutationPage.evaluate(() => {
     document.querySelector('#previously-hidden').style.display = '';
+    document.querySelector('#class-hidden').classList.remove('display-closed');
+    document.querySelector('#visibility-hidden').classList.remove('visibility-closed');
+    document.querySelector('#attribute-hidden').removeAttribute('hidden');
+    document.querySelector('#hidden-input-form').removeAttribute('hidden');
+    document.querySelector('#mixed-hidden').removeAttribute('hidden');
+    document.querySelector('#mixed-visibility').setAttribute('data-rescan', 'yes');
     document.querySelector('#changed-first').firstChild.data = 'First changed text.';
     const added = document.createElement('section');
     added.id = 'added-subtree';
@@ -1523,13 +1651,18 @@ try {
     document.querySelector('#added-subtree')?.textContent?.includes('IT:Nested added text.') &&
     document.querySelector('#move-to #moved-target')?.textContent?.includes('IT:Moved target text.') &&
     document.body.textContent?.includes('IT:Direct body text.') &&
-    document.querySelector('#dynamic-input')?.value?.includes('IT:Direct added input.'),
+    document.querySelector('#dynamic-input')?.value?.includes('IT:Direct added input.') &&
+    document.querySelector('#previously-hidden')?.textContent?.includes('IT:Previously hidden unrelated phrase.') &&
+    document.querySelector('#class-hidden')?.textContent?.includes('IT:Class revealed nested phrase.') &&
+    document.querySelector('#visibility-hidden')?.textContent?.includes('IT:Visibility revealed phrase.') &&
+    document.querySelector('#attribute-hidden')?.textContent?.includes('IT:Hidden attribute revealed phrase.') &&
+    document.querySelector('#hidden-input')?.value?.includes('IT:Revealed input phrase.') &&
+    document.querySelector('#mixed-hidden')?.textContent?.includes('IT:Newly revealed phrase.'),
     null, { timeout: 15000 });
-  check((await mutationPage.locator('#previously-hidden').textContent()) === 'Previously hidden unrelated phrase.',
-    'mutation processing does not scan unrelated newly visible text');
   const mutationRequests = requests.slice(mutationRequestStart).map((request) => request.messages[1].content);
-  check(!mutationRequests.some((request) => request.includes('Previously hidden unrelated phrase.')),
-    'unrelated newly visible text is not sent to the provider');
+  check(!mutationRequests.some((request) => request.includes('Already translated phrase.')) &&
+    (await mutationPage.locator('#already-visible').textContent()) === 'IT:Already translated phrase.',
+    'visibility rescans skip previously translated descendants');
   check(!mutationRequests.some((request) =>
     ['Excluded ancestor text.', 'Hidden ancestor text.', 'Excluded tag text.', 'Detached before debounce.'].some((text) => request.includes(text))),
     'targeted scans skip excluded, hidden, and detached nodes');
@@ -1540,6 +1673,41 @@ try {
   check(mutationScanRoots.some((root) => root.includes('#added-subtree')) &&
     !mutationScanRoots.some((root) => root === 'html > body'),
     'observer-triggered scans do not traverse the whole document');
+  check((await mutationPage.locator('#still-hidden').textContent()) === 'Later revealed phrase.',
+    'visibility rescans leave hidden descendants untranslated');
+  await mutationPage.evaluate(() => {
+    document.body.setAttribute('data-rescan', 'yes');
+    document.querySelector('#class-hidden').setAttribute('data-rescan', 'yes');
+    document.querySelector('#still-hidden').removeAttribute('hidden');
+  });
+  await mutationPage.waitForFunction(() => document.querySelector('#still-hidden')?.textContent?.includes('IT:Later revealed phrase.'), null, { timeout: 15000 });
+  const laterRequests = requests.slice(mutationRequestStart).map((request) => request.messages[1].content);
+  check(laterRequests.filter((request) => request.includes('Later revealed phrase.')).length === 1 &&
+    (await mutationPage.locator('#already-visible').textContent()) === 'IT:Already translated phrase.',
+    'overlapping body and descendant rescans translate newly visible content only once');
+  const continuousScanDelay = await mutationPage.evaluate(async () => {
+    const probe = document.createElement('p');
+    probe.id = 'continuous-mutation-probe';
+    probe.textContent = 'Text during continuous mutations.';
+    const ticker = document.createElement('div');
+    document.body.append(probe, ticker);
+    const started = performance.now();
+    let tick = 0;
+    const interval = setInterval(() => ticker.setAttribute('data-tick', String(tick++)), 100);
+    while (!probe.querySelector('.xt-node') && performance.now() - started < 2200) {
+      await new Promise((resolve) => setTimeout(resolve, 25));
+    }
+    const delay = probe.querySelector('.xt-node') ? performance.now() - started : null;
+    clearInterval(interval);
+    ticker.remove();
+    return delay;
+  });
+  check(continuousScanDelay !== null && continuousScanDelay < 2000,
+    `continuous mutations do not postpone scanning for several seconds (${continuousScanDelay} ms)`);
+  await mutationPage.waitForFunction(() =>
+    document.querySelector('#continuous-mutation-probe')?.textContent?.includes('IT:Text during continuous mutations.'),
+  null, { timeout: 15000 });
+  await mutationPage.evaluate(() => document.querySelector('#continuous-mutation-probe').remove());
   await mutationTabMsg({ type: 'restore' });
   await mutationPage.close();
 

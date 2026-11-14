@@ -297,6 +297,7 @@ async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentC
     experimentalCachedTextContentOverride: tab.experimentalCachedTextContent,
     autoTranslate: !!host && cfg.autoTranslateSites.includes(host),
     textDiagnostics: cfg.textDiagnostics,
+    mutationDiagnosticFilter: tab.mutationDiagnosticFilter ?? '',
   };
 }
 

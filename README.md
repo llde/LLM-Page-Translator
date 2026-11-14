@@ -65,7 +65,7 @@ Reload open tabs after installing so the content script is injected.
 | Default tab prompt | Initial value for each tab |
 | Default target language | Selector with common languages |
 | Always translate these sites | Hostnames translated automatically on load |
-| Translate dynamic content | Watch the page for new text |
+| Translate dynamic content | Watch for new text and content revealed by attribute or style changes |
 
 **Toolbar popup** (per tab): source language (default *Auto-detect*; set it when the page language is ambiguous,
 e.g. Spanish vs Portuguese, so the model is told explicitly), target language (default: the global one),
@@ -75,11 +75,17 @@ query strings and fragments are excluded.
 matching rules persist across browser restarts, and the most specific matching path wins. A tab-specific prompt takes priority,
 followed by a saved URL rule and then the global default tab prompt.
 per-tab overrides for chunk size, model, temperature, number separation, setter hooks, slice handling, and immediate cached text insertion.
+Boolean checkboxes follow global settings until changed; **Reset to global defaults** restores inheritance.
 Page behavior overrides take effect the next time translation is started. Disabling setter hooks disables their dependent options without erasing their saved values. The popup also offers *Translate page*, *Restore original*, *Retry failed*,
 *Always translate this site*, live progress, and a per-tab *Text scan diagnostics* toggle. When enabled, text-node
 accept/reject decisions, observer mutations (including added, removed, and changed nodes), chunk dispatch,
 backend completion/failure, and DOM replacement (with short text previews)
 are logged to the tab's DevTools console; backend request-stage events also appear in the extension service worker console.
+The per-tab mutation diagnostic filter limits observer logs to records whose node paths or text contain the given
+case-insensitive substring; leave it blank to log all mutations. Summary counts still describe the entire mutation batch.
+The filter does not change translation or other diagnostics.
+Dynamic scans normally wait 600 ms after the last relevant mutation, but continuous mutations trigger a scan after
+about 1.2 seconds instead of postponing it indefinitely; browser scheduling can delay this further.
 
 ## Ollama CORS
 

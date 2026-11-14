@@ -50,6 +50,9 @@
     <input type="checkbox" id="textDiagnostics" />
     Text scan diagnostics
   </label>
+  <label>Mutation diagnostic filter (path or text)
+    <input id="mutationDiagnosticFilter" type="text" placeholder="Leave blank to log all mutations" />
+  </label>
 
   <details>
     <summary>Per-tab overrides</summary>
@@ -62,26 +65,23 @@
     <label>Temperature
       <input id="temperature" type="number" min="0" max="2" step="any" />
     </label>
-    <label>Keep numbers unchanged and use them as chunk separators
-      <select id="separateNumbers">
-        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
-      </select>
+    <label class="check">
+      <input id="separateNumbers" type="checkbox" />
+      Keep numbers unchanged and use them as chunk separators
     </label>
-    <label>Enable innerHTML and textContent hooks
-      <select id="enableSetterHooks">
-        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
-      </select>
+    <label class="check">
+      <input id="enableSetterHooks" type="checkbox" />
+      Enable innerHTML and textContent hooks
     </label>
-    <label>Experimental: ignore textContent updates from string slices
-      <select id="experimentalSliceGuard">
-        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
-      </select>
+    <label class="check">
+      <input id="experimentalSliceGuard" type="checkbox" />
+      Experimental: ignore textContent updates from string slices
     </label>
-    <label>Experimental: apply cached textContent translations immediately
-      <select id="experimentalCachedTextContent">
-        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
-      </select>
+    <label class="check">
+      <input id="experimentalCachedTextContent" type="checkbox" />
+      Experimental: apply cached textContent translations immediately
     </label>
+    <p class="hint">Checkboxes follow global settings until changed. Reset restores global defaults.</p>
     <button id="resetTab" type="button">Reset to global defaults</button>
   </details>
   <p class="hint">Changes are saved automatically. Page behavior overrides apply the next time you start translation.</p>

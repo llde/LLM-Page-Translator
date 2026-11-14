@@ -39,6 +39,20 @@ export function diagnosticMutation(record: MutationRecord) {
   };
 }
 
+export function matchesMutationDiagnosticFilter(
+  record: MutationRecord,
+  diagnostic: ReturnType<typeof diagnosticMutation>,
+  filter: string,
+): boolean {
+  const search = filter.trim().toLowerCase();
+  if (!search) return true;
+  const matches = (node: Node, path: string) =>
+    path.toLowerCase().includes(search) || (node.textContent ?? '').toLowerCase().includes(search);
+  return matches(record.target, diagnostic.target.path) ||
+    Array.from(record.addedNodes).some((node, i) => matches(node, diagnostic.addedNodes[i].path)) ||
+    Array.from(record.removedNodes).some((node, i) => matches(node, diagnostic.removedNodes[i].path));
+}
+
 export function analyzeMutationBatch<T>(
   records: readonly T[],
   isRelevant: (record: T) => boolean,

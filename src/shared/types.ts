@@ -33,6 +33,7 @@ export interface TabPromptRule {
 export interface TabSettings {
   tabPrompt?: string;
   textDiagnostics?: boolean;
+  mutationDiagnosticFilter?: string;
   separateNumbers?: boolean;
   enableSetterHooks?: boolean;
   experimentalSliceGuard?: boolean;
@@ -88,6 +89,7 @@ export interface ContentConfig {
   experimentalCachedTextContentOverride?: boolean;
   autoTranslate: boolean;
   textDiagnostics: boolean;
+  mutationDiagnosticFilter: string;
 }
 
 export interface PageStatus {
@@ -124,6 +126,7 @@ export type TabRequest =
   | { type: 'status' }
   | { type: 'invalidateMemoryIndex' }
   | { type: 'retryErrors' }
-  | { type: 'setDiagnostics'; enabled: boolean };
+  | { type: 'setDiagnostics'; enabled: boolean }
+  | { type: 'setMutationDiagnosticFilter'; filter: string };
 
 export const PORT_NAME = 'xt';

@@ -14,7 +14,7 @@ import {
   type TabRequest,
 } from '../shared/types';
 import { createBadge } from './badge';
-import { analyzeMutationBatch, diagnosticMutation, diagnosticTextPreview, logTextDiagnostic } from './diagnostics';
+import { analyzeMutationBatch, diagnosticMutation, diagnosticTextPreview, logTextDiagnostic, matchesMutationDiagnosticFilter } from './diagnostics';
 import { canTranslateTextAssignment, createSegSpan, createWrappedText, isOwnNode, matchesOriginalInnerHTML, originalTextContent, preserveTranslatedInnerHTML, restoreAll, scanFormInputs, scanTextNodes, splitWhitespace, wrapTextNode, type WrappedSegment } from './dom';
 import { injectStyles, removeStyles } from './styles';
 
@@ -46,6 +46,7 @@ interface Chunk {
 
 const KEEPALIVE_MS = 20_000;
 const MUTATION_DEBOUNCE_MS = 600;
+const MUTATION_MAX_WAIT_MS = 1_200;
 const STATE_CLASSES = ['xt-busy', 'xt-spin', 'xt-error', 'xt-oversized'];
 
 let active = false;
@@ -62,6 +63,7 @@ let port: Runtime.Port | null = null;
 let keepalive: ReturnType<typeof setInterval> | null = null;
 let observer: MutationObserver | null = null;
 let debounce: ReturnType<typeof setTimeout> | null = null;
+let debounceMax: ReturnType<typeof setTimeout> | null = null;
 let setterGuardInstalled = false;
 let ignoredSliceText = new WeakMap<Text, string>();
 let memoryIndex: TranslationMemoryIndex | null = null;
@@ -722,6 +724,7 @@ function scan(roots?: readonly (Element | Text)[]): void {
 
 function isRelevantMutation(m: MutationRecord): boolean {
   if (isOwnNode(m.target)) return false;
+  if (m.type === 'attributes') return m.target.nodeType === Node.ELEMENT_NODE;
   if (m.type === 'characterData') return m.target.nodeType === Node.TEXT_NODE || m.target.nodeType === Node.CDATA_SECTION_NODE;
   return Array.from(m.addedNodes).some((n) => !isOwnNode(n) && (n.nodeType === Node.TEXT_NODE || n.nodeType === Node.ELEMENT_NODE));
 }
@@ -743,8 +746,9 @@ function scanPendingMutations(): void {
   pendingMutationRoots.clear();
   const candidateSet = new Set<Node>(candidates);
   const roots = candidates.filter((node) => {
-    for (let parent = node.parentNode; parent && parent !== document.body; parent = parent.parentNode) {
+    for (let parent = node.parentNode; parent; parent = parent.parentNode) {
       if (candidateSet.has(parent)) return false;
+      if (parent === document.body) break;
     }
     return true;
   }).sort((a, b) => {
@@ -754,6 +758,14 @@ function scanPendingMutations(): void {
     return 0;
   });
   if (roots.length) scan(roots);
+}
+
+function flushPendingMutations(): void {
+  if (debounce) clearTimeout(debounce);
+  if (debounceMax) clearTimeout(debounceMax);
+  debounce = null;
+  debounceMax = null;
+  scanPendingMutations();
 }
 
 function processMutationRecords(records: MutationRecord[]): void {
@@ -790,24 +802,31 @@ function processMutationRecords(records: MutationRecord[]): void {
     ? debounce ? 'restarted' : 'scheduled'
     : 'unchanged';
   if (analysis.relevantRecords) {
-    logTextDiagnostic('mutation observer', {
-      recordCount: records.length,
-      relevantRecordCount: analysis.relevantRecords.length,
-      ignoredRecordCount: records.length - analysis.relevantRecords.length,
-      childListRecords: records.filter((record) => record.type === 'childList').length,
-      characterDataRecords: records.filter((record) => record.type === 'characterData').length,
-      debounceAction,
-      mutations: records.map((record) => ({
-        ...diagnosticMutation(record),
-        ...(suppressed.has(record) ? { sliceWrapper: true, isSubstring: true } : {}),
-      })),
+    const filter = cfg?.mutationDiagnosticFilter ?? '';
+    const mutations = records.flatMap((record) => {
+      const diagnostic = diagnosticMutation(record);
+      return matchesMutationDiagnosticFilter(record, diagnostic, filter)
+        ? [{ ...diagnostic, ...(suppressed.has(record) ? { sliceWrapper: true, isSubstring: true } : {}) }]
+        : [];
     });
+    if (mutations.length) {
+      logTextDiagnostic('mutation observer', {
+        recordCount: records.length,
+        relevantRecordCount: analysis.relevantRecords.length,
+        ignoredRecordCount: records.length - analysis.relevantRecords.length,
+        childListRecords: records.filter((record) => record.type === 'childList').length,
+        characterDataRecords: records.filter((record) => record.type === 'characterData').length,
+        attributeRecords: records.filter((record) => record.type === 'attributes').length,
+        debounceAction,
+        mutations,
+      });
+    }
   }
   if (!analysis.hasRelevantRecords) return;
   for (const record of records) {
     if (suppressed.has(record) || !isRelevantMutation(record)) continue;
-    if (record.type === 'characterData') {
-      pendingMutationRoots.add(record.target);
+    if (record.type === 'characterData' || record.type === 'attributes') {
+      pendingMutationRoots.add(record.target === document.documentElement ? document.body : record.target);
     } else {
       for (const node of record.addedNodes) {
         if (isScanRoot(node) && !isOwnNode(node)) pendingMutationRoots.add(node);
@@ -815,10 +834,8 @@ function processMutationRecords(records: MutationRecord[]): void {
     }
   }
   if (debounce) clearTimeout(debounce);
-  debounce = setTimeout(() => {
-    debounce = null;
-    scanPendingMutations();
-  }, MUTATION_DEBOUNCE_MS);
+  else debounceMax = setTimeout(flushPendingMutations, MUTATION_MAX_WAIT_MS);
+  debounce = setTimeout(flushPendingMutations, MUTATION_DEBOUNCE_MS);
 }
 
 document.addEventListener('llm-page-translator:slice-before', (event) => {
@@ -837,9 +854,9 @@ document.addEventListener('llm-page-translator:slice-after', (event) => {
 }, true);
 
 function startObserver(): void {
-  if (observer || !document.body) return;
+  if (observer || !document.body || !document.documentElement) return;
   observer = new MutationObserver(processMutationRecords);
-  observer.observe(document.body, { childList: true, subtree: true, characterData: true });
+  observer.observe(document.documentElement, { childList: true, subtree: true, characterData: true, attributes: true });
 }
 
 function stopObserver(): void {
@@ -849,7 +866,9 @@ function stopObserver(): void {
   pendingMutationRoots.clear();
   ignoredSliceText = new WeakMap<Text, string>();
   if (debounce) clearTimeout(debounce);
+  if (debounceMax) clearTimeout(debounceMax);
   debounce = null;
+  debounceMax = null;
 }
 
 // ---------- public actions ----------
@@ -965,6 +984,9 @@ browser.runtime.onMessage.addListener((raw: unknown) => {
           scan();
         }
       }
+      return Promise.resolve(status());
+    case 'setMutationDiagnosticFilter':
+      if (cfg) cfg = { ...cfg, mutationDiagnosticFilter: msg.filter };
       return Promise.resolve(status());
     default:
       return undefined;

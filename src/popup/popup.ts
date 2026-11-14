@@ -16,12 +16,15 @@ const fields = {
   model: $<HTMLSelectElement>('model'),
   temperature: $<HTMLInputElement>('temperature'),
   textDiagnostics: $<HTMLInputElement>('textDiagnostics'),
-  separateNumbers: $<HTMLSelectElement>('separateNumbers'),
-  enableSetterHooks: $<HTMLSelectElement>('enableSetterHooks'),
-  experimentalSliceGuard: $<HTMLSelectElement>('experimentalSliceGuard'),
-  experimentalCachedTextContent: $<HTMLSelectElement>('experimentalCachedTextContent'),
+  mutationDiagnosticFilter: $<HTMLInputElement>('mutationDiagnosticFilter'),
+  separateNumbers: $<HTMLInputElement>('separateNumbers'),
+  enableSetterHooks: $<HTMLInputElement>('enableSetterHooks'),
+  experimentalSliceGuard: $<HTMLInputElement>('experimentalSliceGuard'),
+  experimentalCachedTextContent: $<HTMLInputElement>('experimentalCachedTextContent'),
 };
 
+const booleanOverrideKeys = ['separateNumbers', 'enableSetterHooks', 'experimentalSliceGuard', 'experimentalCachedTextContent'] as const;
+let booleanOverrides: Pick<TabSettings, typeof booleanOverrideKeys[number]> = {};
 let tabId = -1;
 let host = '';
 let tabUrl = '';
@@ -74,7 +77,6 @@ async function refresh() {
 
 function readTabSettings(): TabSettings {
   const num = (v: string) => (v.trim() === '' ? undefined : Number(v));
-  const bool = (v: string) => v === 'true' ? true : v === 'false' ? false : undefined;
   return {
     sourceLanguage: fields.sourceLanguage.value || undefined,
     targetLanguage: fields.targetLanguage.value || undefined,
@@ -83,10 +85,8 @@ function readTabSettings(): TabSettings {
     model: fields.model.value.trim() || undefined,
     temperature: num(fields.temperature.value),
     textDiagnostics: fields.textDiagnostics.checked,
-    separateNumbers: bool(fields.separateNumbers.value),
-    enableSetterHooks: bool(fields.enableSetterHooks.value),
-    experimentalSliceGuard: bool(fields.experimentalSliceGuard.value),
-    experimentalCachedTextContent: bool(fields.experimentalCachedTextContent.value),
+    mutationDiagnosticFilter: fields.mutationDiagnosticFilter.value,
+    ...booleanOverrides,
   };
 }
 
@@ -108,15 +108,16 @@ function fillTabSettings(t: TabSettings) {
   fillModel(t.model ?? '');
   fields.temperature.value = t.temperature?.toString() ?? '';
   fields.textDiagnostics.checked = t.textDiagnostics ?? false;
-  for (const key of ['separateNumbers', 'enableSetterHooks', 'experimentalSliceGuard', 'experimentalCachedTextContent'] as const) {
-    fields[key].options[0].textContent = `Global default (${global[key] ? 'enabled' : 'disabled'})`;
-    fields[key].value = t[key] === undefined ? '' : String(t[key]);
+  fields.mutationDiagnosticFilter.value = t.mutationDiagnosticFilter ?? '';
+  for (const key of booleanOverrideKeys) {
+    booleanOverrides[key] = t[key];
+    fields[key].checked = t[key] ?? global[key];
   }
   updateHookOptions();
 }
 
 function updateHookOptions() {
-  const enabled = fields.enableSetterHooks.value === '' ? global.enableSetterHooks : fields.enableSetterHooks.value === 'true';
+  const enabled = fields.enableSetterHooks.checked;
   fields.experimentalSliceGuard.disabled = !enabled;
   fields.experimentalCachedTextContent.disabled = !enabled;
 }
@@ -146,9 +147,16 @@ async function loadModels() {
 }
 
 let saveTimer: ReturnType<typeof setTimeout> | undefined;
+let filterTimer: ReturnType<typeof setTimeout> | undefined;
 function scheduleSave() {
   clearTimeout(saveTimer);
-  saveTimer = setTimeout(() => saveTab(tabId, readTabSettings()), 250);
+  saveTimer = setTimeout(async () => {
+    try {
+      await saveTab(tabId, readTabSettings());
+    } catch (e) {
+      setStatus(`Could not save tab settings: ${String(e)}`, true);
+    }
+  }, 250);
 }
 
 async function checkPermissions() {
@@ -197,7 +205,16 @@ async function init() {
     global = await saveGlobal({ autoTranslateSites: [...sites] });
   });
 
+  for (const key of booleanOverrideKeys) {
+    fields[key].addEventListener('input', () => { booleanOverrides[key] = fields[key].checked; });
+  }
   Object.values(fields).forEach((f) => f.addEventListener('input', scheduleSave));
+  fields.mutationDiagnosticFilter.addEventListener('input', () => {
+    clearTimeout(filterTimer);
+    filterTimer = setTimeout(async () => {
+      await sendToTab({ type: 'setMutationDiagnosticFilter', filter: fields.mutationDiagnosticFilter.value });
+    }, 250);
+  });
   fields.enableSetterHooks.addEventListener('change', updateHookOptions);
   fields.textDiagnostics.addEventListener('change', async () => {
     clearTimeout(saveTimer);
@@ -271,6 +288,8 @@ async function init() {
     }
   });
   $('resetTab').addEventListener('click', async () => {
+    clearTimeout(saveTimer);
+    clearTimeout(filterTimer);
     const keep: TabSettings = {
       tabPrompt: fields.tabPrompt.value,
       sourceLanguage: fields.sourceLanguage.value || undefined,
@@ -278,6 +297,7 @@ async function init() {
     };
     await saveTab(tabId, keep);
     fillTabSettings(keep);
+    await sendToTab({ type: 'setMutationDiagnosticFilter', filter: '' });
   });
   $('openOptions').addEventListener('click', (e) => {
     e.preventDefault();
