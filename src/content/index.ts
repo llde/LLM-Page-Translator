@@ -86,7 +86,7 @@ function invalidateMemoryIndex(): void {
   memoryIndex = null;
   cachedChunks.clear();
   if (pendingIndex) pendingIndex.invalidated = true;
-  if (active && cfg?.translateDynamic) {
+  if (active && cfg?.translateDynamic && cfg.experimentalCachedTextContent) {
     const pending = { changes: [] as { key: string; value: unknown }[], invalidated: false };
     pendingIndex = pending;
     void loadMemoryIndex(pending);
@@ -97,6 +97,15 @@ browser.storage.onChanged.addListener((changes, area) => {
   let updated = false;
   for (const [key, change] of Object.entries(changes)) {
     if ((area === 'local' && key === 'settings') || ((area === 'local' || area === 'session') && key.startsWith('tab:'))) {
+      if (area === 'local' && key === 'settings' && cfg) {
+        const settings = change.newValue;
+        cfg = {
+          ...cfg,
+          experimentalCachedTextContent: cfg.enableSetterHooks && (cfg.experimentalCachedTextContentOverride ??
+            (!!settings && typeof settings === 'object' &&
+              'experimentalCachedTextContent' in settings && settings.experimentalCachedTextContent === true)),
+        };
+      }
       invalidateMemoryIndex();
     } else if (area === 'local') {
       if (pendingIndex) pendingIndex.changes.push({ key, value: change.newValue });
@@ -125,7 +134,7 @@ async function loadMemoryIndex(pending: NonNullable<typeof pendingIndex>): Promi
 
 function applyCachedText(target: Node, value: string): boolean {
   const config = cfg;
-  if (!config?.translateDynamic || !memoryIndex || !canTranslateTextAssignment(target, value)) return false;
+  if (!config?.translateDynamic || !config.experimentalCachedTextContent || !memoryIndex || !canTranslateTextAssignment(target, value)) return false;
   const parts = config.separateNumbers
     ? splitNumberSeparatedPhrases(value)
     : splitPhrases(value).map((raw) => ({ raw, kind: 'text' as const }));
@@ -464,7 +473,7 @@ function checkMemory(c: Chunk): void {
     });
   }
   try {
-    post({ type: 'checkMemory', chunkId: c.id, segments });
+    post({ type: 'checkMemory', chunkId: c.id, segments, experimentalCachedTextContent: cfg?.experimentalCachedTextContent === true });
   } catch (e) {
     markError(c, {
       message: 'Cannot reach the extension background',
@@ -521,7 +530,7 @@ function dispatch(c: Chunk): void {
     });
   }
   try {
-    post({ type: 'translate', chunkId: c.id, segments });
+    post({ type: 'translate', chunkId: c.id, segments, experimentalCachedTextContent: cfg?.experimentalCachedTextContent === true });
     startKeepalive();
   } catch (e) {
     busy--;
@@ -856,16 +865,20 @@ async function start(): Promise<void> {
     if (pendingIndex === pending) pendingIndex = null;
     throw error;
   }
-  if (cfg.translateDynamic) await loadMemoryIndex(pending);
+  if (cfg.translateDynamic && cfg.experimentalCachedTextContent) await loadMemoryIndex(pending);
   else if (pendingIndex === pending) pendingIndex = null;
-  if (!setterGuardInstalled) await browser.runtime.sendMessage({ type: 'installSetterGuard' });
-  if (document.dispatchEvent(new CustomEvent('llm-page-translator:setter-guard-start', {
-    cancelable: true,
-    detail: cfg.experimentalSliceGuard ? 'slice' : '',
-  }))) {
-    throw new Error('Could not activate the page setter guard');
+  if (cfg.enableSetterHooks) {
+    if (!setterGuardInstalled) await browser.runtime.sendMessage({ type: 'installSetterGuard' });
+    if (document.dispatchEvent(new CustomEvent('llm-page-translator:setter-guard-start', {
+      cancelable: true,
+      detail: cfg.experimentalSliceGuard ? 'slice' : '',
+    }))) {
+      throw new Error('Could not activate the page setter guard');
+    }
+    setterGuardInstalled = true;
+  } else if (setterGuardInstalled) {
+    document.dispatchEvent(new Event('llm-page-translator:setter-guard-stop'));
   }
-  setterGuardInstalled = true;
   active = true;
   injectStyles();
   scan();

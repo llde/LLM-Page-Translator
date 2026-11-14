@@ -187,6 +187,9 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
       let diagnosticsEnabled = false;
       try {
         const cfg = await getSettings(tabId, port.sender?.tab?.url);
+        if (typeof msg.experimentalCachedTextContent === 'boolean') {
+          cfg.experimentalCachedTextContent = msg.experimentalCachedTextContent;
+        }
         diagnosticsEnabled = cfg.textDiagnostics;
         const pageUrl = port.sender?.tab?.url;
         const frameId = port.sender?.frameId;
@@ -274,7 +277,8 @@ browser.runtime.onConnect.addListener((port: Runtime.Port) => {
 });
 
 async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentConfig> {
-  const cfg = await getSettings(sender.tab?.id);
+  const tab = sender.tab?.id === undefined ? {} : await loadTab(sender.tab.id);
+  const cfg = effectiveConfig(await loadGlobal(), tab);
   if (sender.tab?.url) {
     const cleanup = await visitTranslationMemory(sender.tab.url, cfg.memoryRetentionDays);
     if (cfg.textDiagnostics && (cleanup.expiredPages > 0 || cleanup.expiredEntries > 0)) {
@@ -287,7 +291,10 @@ async function getContentConfig(sender: Runtime.MessageSender): Promise<ContentC
     concurrency: Math.max(1, cfg.concurrency),
     translateDynamic: cfg.translateDynamic,
     separateNumbers: cfg.separateNumbers,
+    enableSetterHooks: cfg.enableSetterHooks,
     experimentalSliceGuard: cfg.experimentalSliceGuard,
+    experimentalCachedTextContent: cfg.experimentalCachedTextContent,
+    experimentalCachedTextContentOverride: tab.experimentalCachedTextContent,
     autoTranslate: !!host && cfg.autoTranslateSites.includes(host),
     textDiagnostics: cfg.textDiagnostics,
   };

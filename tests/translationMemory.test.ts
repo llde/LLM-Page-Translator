@@ -32,6 +32,7 @@ import {
 } from '../src/shared/translationMemory';
 
 const settings = effectiveConfig(DEFAULT_SETTINGS, {});
+const indexedSettings = { ...settings, experimentalCachedTextContent: true };
 const segments = [{ id: 1, text: 'Hello.' }, { id: 2, text: 'Goodbye.' }];
 const translations = { 1: 'Ciao.', 2: 'Arrivederci.' };
 
@@ -56,37 +57,49 @@ afterEach(() => {
 });
 
 describe('translation memory', () => {
+  it('only indexes newly cached source text when the experimental option is enabled', async () => {
+    const page = 'https://example.com/opt-in';
+    await setTranslationMemory(context(page), settings, segments, translations);
+    await expect(getTranslationMemory(context(page), settings, segments)).resolves.toEqual(translations);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), indexedSettings)).entries)).toEqual([]);
+
+    await expect(getTranslationMemory(context(page), indexedSettings, segments)).resolves.toEqual(translations);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), indexedSettings)).entries)).toEqual([
+      { texts: ['Hello.', 'Goodbye.'], translations: ['Ciao.', 'Arrivederci.'] },
+    ]);
+  });
+
   it('preloads only chunks for the same page, frame ancestry, and translation settings', async () => {
     const page = 'https://example.com/article';
     const frame = context(page, 4, 'https://example.com/frame');
-    await setTranslationMemory(context(page), settings, segments, translations);
-    await setTranslationMemory(frame, settings, segments, { 1: 'Frame hello.', 2: 'Frame goodbye.' });
-    await setTranslationMemory(context(page), effectiveConfig(DEFAULT_SETTINGS, { targetLanguage: 'French' }), segments, { 1: 'Bonjour.', 2: 'Au revoir.' });
-    await setTranslationMemory(context('https://example.com/other'), settings, segments, translations);
+    await setTranslationMemory(context(page), indexedSettings, segments, translations);
+    await setTranslationMemory(frame, indexedSettings, segments, { 1: 'Frame hello.', 2: 'Frame goodbye.' });
+    await setTranslationMemory(context(page), { ...indexedSettings, targetLanguage: 'French' }, segments, { 1: 'Bonjour.', 2: 'Au revoir.' });
+    await setTranslationMemory(context('https://example.com/other'), indexedSettings, segments, translations);
 
-    const index = await getTranslationMemoryIndex(context(page), settings);
+    const index = await getTranslationMemoryIndex(context(page), indexedSettings);
     expect(Object.values(index.entries)).toEqual([{ texts: ['Hello.', 'Goodbye.'], translations: ['Ciao.', 'Arrivederci.'] }]);
-    const frameIndex = await getTranslationMemoryIndex(frame, settings);
+    const frameIndex = await getTranslationMemoryIndex(frame, indexedSettings);
     expect(Object.values(frameIndex.entries)).toEqual([{ texts: ['Hello.', 'Goodbye.'], translations: ['Frame hello.', 'Frame goodbye.'] }]);
     await clearPageTranslationMemory(page);
-    expect(Object.values((await getTranslationMemoryIndex(context(page), settings)).entries)).toEqual([]);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), indexedSettings)).entries)).toEqual([]);
   });
 
   it('indexes legacy hashed entries when they are read', async () => {
     const page = 'https://example.com/legacy';
-    await setTranslationMemory(context(page), settings, segments, translations);
+    await setTranslationMemory(context(page), indexedSettings, segments, translations);
     const [key] = [...fakeStorage.items.keys()];
     fakeStorage.items.set(key, ['Ciao.', 'Arrivederci.']);
 
-    await expect(getTranslationMemory(context(page), settings, segments)).resolves.toEqual(translations);
-    expect(Object.values((await getTranslationMemoryIndex(context(page), settings)).entries)).toEqual([
+    await expect(getTranslationMemory(context(page), indexedSettings, segments)).resolves.toEqual(translations);
+    expect(Object.values((await getTranslationMemoryIndex(context(page), indexedSettings)).entries)).toEqual([
       { texts: ['Hello.', 'Goodbye.'], translations: ['Ciao.', 'Arrivederci.'] },
     ]);
   });
 
   it('does not recreate a legacy entry when page memory is cleared during migration', async () => {
     const page = 'https://example.com/legacy-clear';
-    await setTranslationMemory(context(page), settings, segments, translations);
+    await setTranslationMemory(context(page), indexedSettings, segments, translations);
     const [key] = [...fakeStorage.items.keys()];
     fakeStorage.items.set(key, ['Ciao.', 'Arrivederci.']);
     let resumeMigration!: () => void;
@@ -101,7 +114,7 @@ describe('translation memory', () => {
     });
 
     try {
-      const lookup = getTranslationMemory(context(page), settings, segments);
+      const lookup = getTranslationMemory(context(page), indexedSettings, segments);
       await started;
       const clearing = clearPageTranslationMemory(page);
       await Promise.race([clearing, new Promise((resolve) => setTimeout(resolve, 50))]);

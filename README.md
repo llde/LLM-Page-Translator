@@ -15,9 +15,10 @@ LLM served by **Ollama**, **OpenWebUI** or any **OpenAI-compatible** API.
 - A phrase longer than the max chunk size is not sent: an orange overlay lets you **Send as one chunk**
   (raises the limit for that chunk only) or **Split** it (at `, ; :`, then at words).
 - Text added or changed later (infinite scroll, SPA updates) is translated too (can be disabled); only affected nodes and added subtrees are rescanned.
-- Eligible `textContent` assignments whose exact chunks are cached are translated synchronously without rescanning. The frame-scoped cache stores source text and translations in extension storage; older entries become eligible for immediate reuse after a normal cache hit.
+- The default-off **Enable innerHTML and textContent hooks** option intercepts page assignments while translating. It is required for the experimental slice and immediate cached-text options below.
+- The default-off **Experimental: apply cached textContent translations immediately** option translates eligible assignments synchronously without rescanning when their exact chunks are cached. It stores source text and translations in extension storage; older entries become eligible after a normal cache hit. Disabling it does not delete existing indexed entries.
 - The optional **Keep numbers unchanged and use them as chunk separators** setting avoids sending numbers for translation and lets surrounding text reuse memory when numbers change. It also splits numbers inside words and may reduce translation context.
-- While translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. For translated `innerHTML`, unchanged letters and markup also preserve the translation while safely matched numbers are updated in place; other punctuation changes are ignored. Changed markup or ambiguous numeric updates are applied normally and retranslated.
+- With hooks enabled while translating, repeated page-script `textContent` and `innerHTML` assignments matching the original content are ignored, preserving translations and existing nodes. For translated `innerHTML`, unchanged letters and markup also preserve the translation while safely matched numbers are updated in place; other punctuation changes are ignored. Changed markup or ambiguous numeric updates are applied normally and retranslated.
 - The optional **Experimental: ignore textContent updates from string slices** setting applies sliced text but excludes its mutation from dynamic translation. It changes `String.prototype.slice()` to return objects while translating and can break page scripts, including string method calls, strict equality and empty-string checks. Wrapper detection uses constructor names, so similarly named page objects can be mistaken for wrappers. It is disabled by default.
 
 ## Build
@@ -73,7 +74,8 @@ Choose the current path or any ancestor in *Save prompt for path* and save the t
 query strings and fragments are excluded.
 matching rules persist across browser restarts, and the most specific matching path wins. A tab-specific prompt takes priority,
 followed by a saved URL rule and then the global default tab prompt.
-per-tab overrides for chunk size / model / temperature, *Translate page*, *Restore original*, *Retry failed*,
+per-tab overrides for chunk size, model, temperature, number separation, setter hooks, slice handling, and immediate cached text insertion.
+Page behavior overrides take effect the next time translation is started. Disabling setter hooks disables their dependent options without erasing their saved values. The popup also offers *Translate page*, *Restore original*, *Retry failed*,
 *Always translate this site*, live progress, and a per-tab *Text scan diagnostics* toggle. When enabled, text-node
 accept/reject decisions, observer mutations (including added, removed, and changed nodes), chunk dispatch,
 backend completion/failure, and DOM replacement (with short text previews)

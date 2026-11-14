@@ -125,6 +125,7 @@ try {
       maxChunkSize: 120,
       concurrency: 2,
       targetLanguage: 'Italian',
+      enableSetterHooks: true,
       tabPromptRules: [{ urlPrefix: `${base}/story/`, prompt: 'E2E saved URL prompt' }],
     } });
   }, `http://127.0.0.1:${PORT}`);
@@ -626,6 +627,73 @@ try {
         return Object.values(all).find((v) => v && v.sourceLanguage);
       });
       check(saved?.sourceLanguage === 'German' && saved?.targetLanguage === 'French', `tab languages saved: ${JSON.stringify(saved)}`);
+      const overrides = ['separateNumbers', 'experimentalSliceGuard', 'experimentalCachedTextContent'];
+      const hasOverrides = (await Promise.all(overrides.map((id) => pg.locator(`#${id}`).count()))).every((count) => count === 1);
+      check(hasOverrides, 'popup exposes all three per-tab page behavior overrides');
+      if (hasOverrides) {
+        await pg.locator('details > summary').click();
+        const hookOption = pg.locator('#enableSetterHooks');
+        const hasHookOption = (await hookOption.count()) === 1;
+        check(hasHookOption, 'popup exposes a per-tab setter hook override');
+        if (hasHookOption) {
+          await hookOption.selectOption('false');
+          check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
+            await pg.locator('#experimentalCachedTextContent').isDisabled() &&
+            !(await pg.locator('#separateNumbers').isDisabled()),
+          'popup disables hook-dependent options but not number separation');
+          await hookOption.selectOption('true');
+          check(!(await pg.locator('#experimentalSliceGuard').isDisabled()) &&
+            !(await pg.locator('#experimentalCachedTextContent').isDisabled()),
+          'popup re-enables hook-dependent controls');
+        }
+        await pg.locator('#separateNumbers').selectOption('true');
+        await pg.locator('#experimentalSliceGuard').selectOption('false');
+        await pg.locator('#experimentalCachedTextContent').selectOption('true');
+        await pg.waitForTimeout(600);
+        const perTab = await sw.evaluate(async () => {
+          const all = await chrome.storage.session.get(null);
+          return Object.values(all).find((value) => value?.sourceLanguage === 'German');
+        });
+        check(perTab?.separateNumbers === true && perTab?.experimentalSliceGuard === false &&
+          perTab?.experimentalCachedTextContent === true, 'popup saves true and false overrides for the current tab');
+        await pg.reload();
+        await pg.waitForFunction(() => document.querySelector('#experimentalCachedTextContent')?.value === 'true');
+        check((await pg.locator('#separateNumbers').inputValue()) === 'true' &&
+          (await pg.locator('#experimentalSliceGuard').inputValue()) === 'false' &&
+          (!hasHookOption || (await hookOption.inputValue()) === 'true'),
+        'popup reload preserves per-tab behavior overrides');
+        await pg.locator('details > summary').click();
+        if (hasHookOption) {
+          await hookOption.selectOption('false');
+          await pg.waitForTimeout(600);
+          await pg.reload();
+          await pg.waitForFunction(() => document.querySelector('#enableSetterHooks')?.value === 'false');
+          check(await pg.locator('#experimentalSliceGuard').isDisabled() &&
+            await pg.locator('#experimentalCachedTextContent').isDisabled() &&
+            (await pg.locator('#experimentalSliceGuard').inputValue()) === 'false' &&
+            (await pg.locator('#experimentalCachedTextContent').inputValue()) === 'true',
+          'popup preserves disabled dependent overrides across reload');
+          await pg.locator('details > summary').click();
+        }
+        const beforeReset = await sw.evaluate(async () => (await chrome.storage.local.get('settings')).settings);
+        await pg.locator('#resetTab').click();
+        check((await pg.locator('#separateNumbers').inputValue()) === '' &&
+          (await pg.locator('#experimentalSliceGuard').inputValue()) === '' &&
+          (await pg.locator('#experimentalCachedTextContent').inputValue()) === '',
+        'resetting tab overrides restores inherited behavior settings');
+        const afterReset = await sw.evaluate(async () => {
+          const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+          return {
+            tab: (await chrome.storage.session.get(`tab:${tab.id}`))[`tab:${tab.id}`],
+            global: (await chrome.storage.local.get('settings')).settings,
+          };
+        });
+        check(afterReset.tab?.sourceLanguage === 'German' && afterReset.tab?.targetLanguage === 'French' &&
+          afterReset.tab?.separateNumbers === undefined && afterReset.tab?.experimentalSliceGuard === undefined &&
+          afterReset.tab?.experimentalCachedTextContent === undefined && afterReset.tab?.enableSetterHooks === undefined &&
+          JSON.stringify(afterReset.global) === JSON.stringify(beforeReset),
+        'reset preserves tab languages and global settings while clearing behavior overrides');
+      }
     }
     if (p.startsWith('options')) {
       check((await pg.locator('input[name=memoryRetentionDays]').inputValue()) === '30', 'options show the default 30-day memory retention');
@@ -637,6 +705,22 @@ try {
       const hasNumberOption = (await numberOption.count()) === 1;
       check(hasNumberOption && !(await numberOption.isChecked()), 'number separator option is available and disabled by default');
       if (hasNumberOption) await numberOption.check();
+      const cachedTextOption = pg.locator('input[name=experimentalCachedTextContent]');
+      const hasCachedTextOption = (await cachedTextOption.count()) === 1;
+      check(hasCachedTextOption && !(await cachedTextOption.isChecked()), 'experimental cached textContent option is disabled by default');
+      if (hasCachedTextOption) await cachedTextOption.check();
+      const hookOption = pg.locator('input[name=enableSetterHooks]');
+      const hasHookOption = (await hookOption.count()) === 1;
+      check(hasHookOption && await hookOption.isChecked(), 'options expose the enabled global setter hook setting');
+      if (hasHookOption) {
+        await hookOption.uncheck();
+        check(await sliceOption.isDisabled() && await cachedTextOption.isDisabled() && !(await numberOption.isDisabled()),
+          'global options disable hook-dependent controls without disabling number separation');
+        await hookOption.check();
+        check(await sliceOption.isChecked() && await cachedTextOption.isChecked() &&
+          !(await sliceOption.isDisabled()) && !(await cachedTextOption.isDisabled()),
+        're-enabling hooks preserves previously selected dependent options');
+      }
       const opts = await pg.locator('select[name=model] option').allTextContents();
       check(JSON.stringify(opts) === JSON.stringify(['mock', 'other']), `options model list from backend: ${JSON.stringify(opts)}`);
       check((await pg.locator('select[name=model]').inputValue()) === 'mock', 'options shows saved model');
@@ -647,9 +731,11 @@ try {
       check(savedSettings.tabPromptRules?.[0]?.prompt === 'E2E saved URL prompt', 'saving global options preserves URL prompt rules');
       check(hasSliceOption && savedSettings.experimentalSliceGuard === true, 'options save the experimental slice setting');
       check(hasNumberOption && savedSettings.separateNumbers === true, 'options save the number separator setting');
+      check(hasCachedTextOption && savedSettings.experimentalCachedTextContent === true, 'options save the experimental cached textContent setting');
       if (hasSliceOption) {
         await sliceOption.uncheck();
         if (hasNumberOption) await numberOption.uncheck();
+        if (hasCachedTextOption) await cachedTextOption.uncheck();
         await pg.locator('button[type=submit]').click();
         await pg.waitForFunction(() => document.querySelector('#msg')?.textContent?.startsWith('Saved'));
       }
@@ -773,6 +859,129 @@ try {
   check(afterRestore, 'restore returns page setters to normal behavior');
   await setterPage.close();
 
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: {
+      ...settings, enableSetterHooks: false, experimentalSliceGuard: true, experimentalCachedTextContent: true,
+    } });
+  });
+  const hookPage = await ctx.newPage();
+  const hookUrl = `http://127.0.0.1:${PORT}/direct-cache-test-hooks`;
+  await hookPage.goto(hookUrl);
+  await hookPage.evaluate(() => {
+    document.body.innerHTML = '<p id="source">Hook source phrase.</p><p id="dynamic"></p><iframe srcdoc="<p id=source>Hook frame phrase.</p>"></iframe>';
+  });
+  await hookPage.waitForFunction(() => document.querySelector('iframe')?.contentDocument?.querySelector('#source'));
+  await hookPage.waitForTimeout(500);
+  await hookPage.evaluate(() => {
+    window.hookOriginal = {
+      text: Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set,
+      html: Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML').set,
+    };
+    const frame = document.querySelector('iframe').contentWindow;
+    frame.hookOriginal = {
+      text: Object.getOwnPropertyDescriptor(frame.Node.prototype, 'textContent').set,
+      html: Object.getOwnPropertyDescriptor(frame.Element.prototype, 'innerHTML').set,
+    };
+  });
+  const hookIds = await sw.evaluate(async (url) => {
+    const [tab] = await chrome.tabs.query({ url });
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: tab.id });
+    return { tabId: tab.id, frameId: frames.find((frame) => frame.parentFrameId === 0).frameId };
+  }, hookUrl);
+  const hookAction = (type) => sw.evaluate(async ({ tabId, frameId, type }) => {
+    await chrome.tabs.sendMessage(tabId, { type }, { frameId: 0 });
+    await chrome.tabs.sendMessage(tabId, { type }, { frameId });
+  }, { ...hookIds, type });
+  const hookState = (page) => page.locator('body').evaluate(() => ({
+    text: Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set === window.hookOriginal.text,
+    html: Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML').set === window.hookOriginal.html,
+    slice: typeof 'sample'.slice(0, 3),
+  }));
+  await hookAction('start');
+  await hookPage.waitForFunction(() => document.querySelector('#source')?.textContent === 'IT:Hook source phrase.' &&
+    document.querySelector('iframe')?.contentDocument?.querySelector('#source')?.textContent === 'IT:Hook frame phrase.',
+  null, { timeout: 15000 });
+  const offState = await hookState(hookPage);
+  const offFrameState = await hookState(hookPage.frameLocator('iframe'));
+  check(offState.text && offState.html && offState.slice === 'string' &&
+    offFrameState.text && offFrameState.html && offFrameState.slice === 'string',
+  'disabled hooks leave native setters and dependent slice behavior untouched in both frames');
+  const disabledAssignment = await hookPage.locator('#dynamic').evaluate((element) => {
+    element.textContent = 'Hook source phrase.';
+    return element.textContent;
+  });
+  check(disabledAssignment === 'Hook source phrase.', 'disabled hooks do not synchronously apply cached text');
+  await hookPage.waitForFunction(() => document.querySelector('#dynamic')?.textContent === 'IT:Hook source phrase.', null, { timeout: 15000 });
+  check(true, 'dynamic translation remains active with hooks disabled');
+  await sw.evaluate(async (tabId) => {
+    await chrome.storage.session.set({ [`tab:${tabId}`]: { enableSetterHooks: true } });
+  }, hookIds.tabId);
+  check((await hookState(hookPage)).text, 'changing the hook override does not change an active translation');
+  await hookAction('restore');
+  await hookAction('start');
+  const onState = await hookState(hookPage);
+  const onFrameState = await hookState(hookPage.frameLocator('iframe'));
+  check(!onState.text && !onState.html && onState.slice === 'object' &&
+    !onFrameState.text && !onFrameState.html && onFrameState.slice === 'object',
+  'enabling hooks activates setters and dependent slice behavior on the next start in both frames');
+  await sw.evaluate(async (tabId) => {
+    await chrome.storage.session.set({ [`tab:${tabId}`]: { enableSetterHooks: false } });
+  }, hookIds.tabId);
+  await hookAction('start');
+  const restartedState = await hookState(hookPage);
+  const restartedFrameState = await hookState(hookPage.frameLocator('iframe'));
+  check(restartedState.text && restartedState.html && restartedState.slice === 'string' &&
+    restartedFrameState.text && restartedFrameState.html && restartedFrameState.slice === 'string',
+  'restarting active translation with hooks disabled removes hooks in both frames');
+  await sw.evaluate(async (tabId) => {
+    await chrome.storage.session.set({ [`tab:${tabId}`]: { enableSetterHooks: true } });
+  }, hookIds.tabId);
+  await hookAction('start');
+  await hookAction('restore');
+  const restoredState = await hookState(hookPage);
+  const restoredFrameState = await hookState(hookPage.frameLocator('iframe'));
+  check(restoredState.text && restoredState.html && restoredState.slice === 'string' &&
+    restoredFrameState.text && restoredFrameState.html && restoredFrameState.slice === 'string',
+  'restore removes setter and slice hooks without leaving prototype changes');
+  await hookAction('start');
+  await hookPage.evaluate(() => {
+    const descriptor = Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML');
+    window.pageSetter = function (value) { descriptor.set.call(this, value); };
+    Object.defineProperty(Element.prototype, 'innerHTML', { ...descriptor, set: window.pageSetter });
+  });
+  await hookAction('restore');
+  check(await hookPage.evaluate(() => Object.getOwnPropertyDescriptor(Element.prototype, 'innerHTML').set === window.pageSetter &&
+    Object.getOwnPropertyDescriptor(Node.prototype, 'textContent').set === window.hookOriginal.text),
+  'restore preserves a page-replaced setter while removing the unchanged hook');
+  check(await hookPage.evaluate(() => {
+    class SliceString {
+      value = 'incorrect';
+      isSubstring = true;
+      toString() { return 'native value'; }
+    }
+    const element = document.createElement('div');
+    element.innerHTML = new SliceString();
+    return element.innerHTML === 'native value';
+  }), 'a retained hook is inert after restore even when another setter wraps it');
+  await hookAction('start');
+  const hookEvents = await hookPage.evaluate(() => {
+    const target = document.querySelector('#dynamic');
+    let count = 0;
+    target.addEventListener('llm-page-translator:check-inner-html', () => count++);
+    target.innerHTML = 'Another hook update.';
+    return count;
+  });
+  check(hookEvents === 1, 'restarting after a page wraps a hook checks each assignment only once');
+  await hookAction('restore');
+  await hookPage.close();
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: {
+      ...settings, enableSetterHooks: true, experimentalSliceGuard: false, experimentalCachedTextContent: false,
+    } });
+  });
+
   const directPage = await ctx.newPage();
   const directObserverSummaries = [];
   directPage.on('pageerror', (e) => errors.push(String(e)));
@@ -788,9 +997,25 @@ try {
   }, { m: msg, url: directUrl });
   await directPage.goto(directUrl);
   await directPage.evaluate(() => {
-    document.body.innerHTML = '<p id="direct-source">Direct cache phrase.</p><p id="direct-target"></p><p id="direct-unrelated"></p><p id="direct-hidden" style="display:none"></p><p id="direct-excluded" translate="no"></p><p id="direct-editable" contenteditable="true"></p><p id="direct-settings"></p><p id="direct-reset-settings"></p><iframe id="direct-frame" srcdoc="<p id=frame-first></p><p id=frame-second></p><p id=frame-third></p>"></iframe>';
+    document.body.innerHTML = '<p id="direct-source">Direct cache phrase.</p><p id="direct-default"></p><p id="direct-target"></p><p id="direct-unrelated"></p><p id="direct-hidden" style="display:none"></p><p id="direct-excluded" translate="no"></p><p id="direct-editable" contenteditable="true"></p><p id="direct-toggle-off"></p><p id="direct-toggle-on"></p><p id="direct-settings"></p><p id="direct-reset-settings"></p><iframe id="direct-frame" srcdoc="<p id=frame-first></p><p id=frame-second></p><p id=frame-third></p>"></iframe>';
   });
   await directPage.waitForTimeout(500);
+  await directTabMsg({ type: 'start' });
+  await directPage.waitForFunction(() => document.querySelector('#direct-source')?.textContent === 'IT:Direct cache phrase.', null, { timeout: 15000 });
+  const defaultRequestCount = requests.length;
+  const defaultAssignment = await directPage.locator('#direct-default').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(defaultAssignment === 'Direct cache phrase.', 'cached textContent assignment is not synchronous by default');
+  await directPage.waitForFunction(() => document.querySelector('#direct-default')?.textContent === 'IT:Direct cache phrase.', null, { timeout: 15000 });
+  check(requests.length === defaultRequestCount, 'disabled experimental option still reuses normal translation memory');
+  await directTabMsg({ type: 'restore' });
+  await directPage.locator('#direct-default').evaluate((element) => element.remove());
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalCachedTextContent: true } });
+  });
   await directTabMsg({ type: 'start' });
   await directPage.waitForFunction(() => document.querySelector('#direct-source')?.textContent === 'IT:Direct cache phrase.', null, { timeout: 15000 });
   await directTabMsg({ type: 'setDiagnostics', enabled: true });
@@ -819,6 +1044,27 @@ try {
   check(directObserverSummaries.some((summary) => summary.mutations.some((mutation) => mutation.target.path.includes('#direct-unrelated'))) &&
     !directObserverSummaries.some((summary) => summary.mutations.some((mutation) => mutation.target.path.includes('#direct-target'))),
   'direct cache hit bypasses observer processing without suppressing unrelated mutations');
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalCachedTextContent: false } });
+  });
+  await directPage.waitForTimeout(500);
+  const toggledOff = await directPage.locator('#direct-toggle-off').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(toggledOff === 'Direct cache phrase.', 'disabling the option stops synchronous insertion on an active page');
+  await directPage.waitForFunction(() => document.querySelector('#direct-toggle-off')?.textContent === 'IT:Direct cache phrase.', null, { timeout: 15000 });
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalCachedTextContent: true } });
+  });
+  await directPage.waitForTimeout(500);
+  const toggledOn = await directPage.locator('#direct-toggle-on').evaluate((target) => {
+    target.textContent = 'Direct cache phrase.';
+    return target.textContent;
+  });
+  check(toggledOn === 'IT:Direct cache phrase.', 'enabling the option restores synchronous insertion on an active page');
   const directTabId = await sw.evaluate(async (url) => (await chrome.tabs.query({ url }))[0].id, directUrl);
   const frameId = await sw.evaluate(async (tabId) => {
     const frames = await chrome.webNavigation.getAllFrames({ tabId });
@@ -928,7 +1174,100 @@ try {
 
   await sw.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...settings, separateNumbers: true } });
+    await chrome.storage.local.set({ settings: { ...settings, separateNumbers: false, experimentalSliceGuard: false, experimentalCachedTextContent: false } });
+  });
+  const overridePage = await ctx.newPage();
+  const inheritedPage = await ctx.newPage();
+  const overrideUrl = `http://127.0.0.1:${PORT}/direct-cache-test-override`;
+  const inheritedUrl = `http://127.0.0.1:${PORT}/direct-cache-test-inherited`;
+  await overridePage.goto(overrideUrl);
+  await inheritedPage.goto(inheritedUrl);
+  for (const testPage of [overridePage, inheritedPage]) {
+    await testPage.evaluate(() => {
+      document.body.innerHTML = '<p id="source">Override source phrase.</p><section><p id="number">Override count 17 units.</p></section><p id="first"></p><p id="later-source"></p><p id="later-copy"></p><p id="restart"></p><iframe srcdoc="<p id=source>Frame override phrase.</p><section><p id=number>Frame count 19 units.</p></section><p id=first></p><p id=restart></p>"></iframe>';
+    });
+  }
+  const overrideIds = await sw.evaluate(async ({ overrideUrl, inheritedUrl }) => {
+    const [overrideTab] = await chrome.tabs.query({ url: overrideUrl });
+    const [inheritedTab] = await chrome.tabs.query({ url: inheritedUrl });
+    const frames = await chrome.webNavigation.getAllFrames({ tabId: overrideTab.id });
+    await chrome.storage.session.set({ [`tab:${overrideTab.id}`]: { separateNumbers: true, experimentalSliceGuard: true, experimentalCachedTextContent: true } });
+    return { tabId: overrideTab.id, inheritedTabId: inheritedTab.id, frameId: frames.find((frame) => frame.parentFrameId === 0).frameId };
+  }, { overrideUrl, inheritedUrl });
+  const startOverrideFrame = (type) => sw.evaluate(async ({ tabId, frameId, type }) => {
+    await chrome.tabs.sendMessage(tabId, { type }, { frameId });
+  }, { ...overrideIds, type });
+  await startOverrideFrame('start');
+  await sw.evaluate(async ({ tabId, inheritedTabId }) => {
+    await chrome.tabs.sendMessage(tabId, { type: 'start' }, { frameId: 0 });
+    await chrome.tabs.sendMessage(inheritedTabId, { type: 'start' }, { frameId: 0 });
+  }, overrideIds);
+  await overridePage.waitForFunction(() => document.querySelector('#source')?.textContent === 'IT:Override source phrase.' &&
+    document.querySelector('#number')?.textContent === 'IT:Override count 17 IT:units.' &&
+    document.querySelector('iframe')?.contentDocument?.querySelector('#source')?.textContent === 'IT:Frame override phrase.' &&
+    document.querySelector('iframe')?.contentDocument?.querySelector('#number')?.textContent === 'IT:Frame count 19 IT:units.',
+  null, { timeout: 15000 });
+  await inheritedPage.waitForFunction(() => document.querySelector('#source')?.textContent === 'IT:Override source phrase.' &&
+    document.querySelector('#number')?.textContent === 'IT:Override count 17 units.', null, { timeout: 15000 });
+  check(await overridePage.evaluate(() => typeof 'sample'.slice(0, 3) === 'object') &&
+    await overridePage.frameLocator('iframe').locator('body').evaluate(() => typeof 'sample'.slice(0, 3) === 'object') &&
+    await inheritedPage.evaluate(() => typeof 'sample'.slice(0, 3) === 'string'),
+  'slice override applies only to the selected tab and its iframe');
+  check(true, 'number separation override applies to the selected tab and iframe while another tab inherits the global default');
+  const assign = (page, selector, text) => page.locator(selector).evaluate((target, value) => {
+    target.textContent = value;
+    return target.textContent;
+  }, text);
+  check(await assign(overridePage, '#first', 'Override source phrase.') === 'IT:Override source phrase.',
+    'explicit cached-text override enables synchronous insertion in its tab');
+  check(await assign(inheritedPage, '#first', 'Override source phrase.') === 'Override source phrase.',
+    'another tab inherits the disabled cached-text global default');
+  check(await assign(overridePage.frameLocator('iframe'), '#first', 'Frame override phrase.') === 'IT:Frame override phrase.',
+    'cached-text override applies to the selected tab iframe');
+  await sw.evaluate(async (tabId) => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, experimentalCachedTextContent: true } });
+    await chrome.storage.local.set({ settings: { ...settings, experimentalCachedTextContent: false } });
+    await chrome.storage.session.set({ [`tab:${tabId}`]: { separateNumbers: false, experimentalSliceGuard: false, experimentalCachedTextContent: false } });
+  }, overrideIds.tabId);
+  await overridePage.waitForTimeout(500);
+  check(await overridePage.evaluate(() => typeof 'sample'.slice(0, 3) === 'object'),
+    'changing the slice override does not alter an active translation');
+  await overridePage.evaluate(() => {
+    const element = document.createElement('p');
+    element.id = 'later-number';
+    element.textContent = 'New count 23 units.';
+    document.body.append(element);
+  });
+  await overridePage.waitForFunction(() => document.querySelector('#later-number')?.textContent === 'IT:New count 23 IT:units.', null, { timeout: 15000 });
+  check(true, 'changing the number separation override does not alter an active translation');
+  await assign(overridePage, '#later-source', 'Fresh override phrase.');
+  await overridePage.waitForFunction(() => document.querySelector('#later-source')?.textContent === 'IT:Fresh override phrase.', null, { timeout: 15000 });
+  check(await assign(overridePage, '#later-copy', 'Fresh override phrase.') === 'IT:Fresh override phrase.',
+    'active override remains enabled for newly cached text until the next start');
+  await startOverrideFrame('restore');
+  await sw.evaluate(async (tabId) => chrome.tabs.sendMessage(tabId, { type: 'restore' }, { frameId: 0 }), overrideIds.tabId);
+  await startOverrideFrame('start');
+  await sw.evaluate(async (tabId) => chrome.tabs.sendMessage(tabId, { type: 'start' }, { frameId: 0 }), overrideIds.tabId);
+  await overridePage.waitForFunction(() => document.querySelector('#source')?.textContent === 'IT:Override source phrase.' &&
+    document.querySelector('#number')?.textContent === 'IT:Override count 17 units.' &&
+    document.querySelector('iframe')?.contentDocument?.querySelector('#source')?.textContent === 'IT:Frame override phrase.' &&
+    document.querySelector('iframe')?.contentDocument?.querySelector('#number')?.textContent === 'IT:Frame count 19 units.',
+  null, { timeout: 15000 });
+  check(await overridePage.evaluate(() => typeof 'sample'.slice(0, 3) === 'string') &&
+    await overridePage.frameLocator('iframe').locator('body').evaluate(() => typeof 'sample'.slice(0, 3) === 'string'),
+  'changed slice override takes effect on the next tab and iframe start');
+  check(true, 'changed number separation override takes effect on the next tab and iframe start');
+  check(await assign(overridePage, '#restart', 'Override source phrase.') === 'Override source phrase.',
+    'changed cached-text override takes effect on the next translation start');
+  check(await assign(overridePage.frameLocator('iframe'), '#restart', 'Frame override phrase.') === 'Frame override phrase.',
+    'changed cached-text override takes effect on the next iframe start');
+  await overridePage.close();
+  await inheritedPage.close();
+
+  await sw.evaluate(async () => {
+    const { settings } = await chrome.storage.local.get('settings');
+    await chrome.storage.local.set({ settings: { ...settings, separateNumbers: true, experimentalCachedTextContent: true } });
   });
   const directNumberPage = await ctx.newPage();
   const directNumberUrl = `http://127.0.0.1:${PORT}/direct-cache-test-numbers`;
@@ -983,7 +1322,7 @@ try {
   await directNumberPage.close();
   await sw.evaluate(async () => {
     const { settings } = await chrome.storage.local.get('settings');
-    await chrome.storage.local.set({ settings: { ...settings, translateDynamic: true } });
+    await chrome.storage.local.set({ settings: { ...settings, translateDynamic: true, experimentalCachedTextContent: false } });
   });
 
   for (const separateNumbers of [false, true]) {

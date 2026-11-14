@@ -3,7 +3,35 @@ import { describe, expect, it, vi } from 'vitest';
 vi.mock('webextension-polyfill', () => ({ default: {} }));
 
 import { findTabPromptRule, makeTabPromptRule, resolveTabPrompt, tabPromptRulePrefixes } from '../src/shared/tabPromptRules';
-import { normalizeGlobal } from '../src/shared/settings';
+import { DEFAULT_SETTINGS, effectiveConfig, normalizeGlobal } from '../src/shared/settings';
+
+describe('per-tab page behavior settings', () => {
+  it('defaults setter hooks off and applies tab overrides without enabling dependent features', () => {
+    const defaults = normalizeGlobal(undefined);
+    expect(defaults.enableSetterHooks).toBe(false);
+    const global = { ...defaults, experimentalSliceGuard: true, experimentalCachedTextContent: true };
+    expect(effectiveConfig(global, {}).experimentalSliceGuard).toBe(false);
+    expect(effectiveConfig(global, {}).experimentalCachedTextContent).toBe(false);
+    const enabled = effectiveConfig(global, { enableSetterHooks: true });
+    expect(enabled.enableSetterHooks).toBe(true);
+    expect(enabled.experimentalSliceGuard).toBe(true);
+    expect(enabled.experimentalCachedTextContent).toBe(true);
+    const disabled = effectiveConfig({ ...global, enableSetterHooks: true }, { enableSetterHooks: false });
+    expect(disabled.enableSetterHooks).toBe(false);
+    expect(disabled.experimentalSliceGuard).toBe(false);
+    expect(disabled.experimentalCachedTextContent).toBe(false);
+  });
+
+  it('inherits global values and respects both true and false overrides', () => {
+    const global = { ...DEFAULT_SETTINGS, enableSetterHooks: true, separateNumbers: true, experimentalSliceGuard: true, experimentalCachedTextContent: true };
+    const flags = ['separateNumbers', 'experimentalSliceGuard', 'experimentalCachedTextContent'] as const;
+    for (const flag of flags) {
+      expect(effectiveConfig(global, {})[flag]).toBe(true);
+      expect(effectiveConfig(global, { [flag]: false })[flag]).toBe(false);
+      expect(effectiveConfig({ ...DEFAULT_SETTINGS, enableSetterHooks: true }, { [flag]: true })[flag]).toBe(true);
+    }
+  });
+});
 
 describe('memory retention setting', () => {
   it('defaults to 30 days and preserves a configured positive integer', () => {

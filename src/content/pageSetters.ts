@@ -92,52 +92,82 @@ function checkDetached(target: Node, eventType: string, value: string): boolean 
   }
 }
 
-function guardSetter(prototype: object, property: string, eventType: string): void {
+function guardSetter(prototype: object, property: string, eventType: string): () => void {
   const descriptor = Object.getOwnPropertyDescriptor(prototype, property);
   if (!descriptor?.set || !descriptor.get) throw new Error(`Cannot guard ${property}: missing native accessor`);
   const nativeSet = descriptor.set;
-  Object.defineProperty(prototype, property, {
-    ...descriptor,
-    set(this: Node, value: unknown) {
-      const slice = isSliceString(value) ? value : undefined;
-      if (slice) value = slice.value;
-      if (state.active && state.experimentalSliceGuard && slice?.isSubstring && eventType === CHECK_TEXT) {
-        nextRequestId = nextRequestId >= 0x7fffffff ? 1 : nextRequestId + 1;
-        const requestId = nextRequestId;
-        if (this.isConnected) this.dispatchEvent(new CustomEvent(SLICE_BEFORE, { bubbles: true, detail: `${requestId}` }));
-        try {
-          nativeSet.call(this, value);
-        } finally {
-          document.dispatchEvent(new CustomEvent(SLICE_AFTER, { detail: `${requestId}` }));
-        }
-        return;
-      }
-      if (state.active) {
-        const comparable = typeof value === 'string' ? value
-          : value === null || (value === undefined && eventType === CHECK_TEXT) ? ''
-            : value === undefined || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint' ? `${value}`
-              : undefined;
-        if (comparable !== undefined) {
-          if (!this.isConnected && checkDetached(this, eventType, comparable)) return;
-          if (this.isConnected) {
-            const event = new CustomEvent(eventType, { bubbles: true, cancelable: true, detail: comparable });
-            if (!this.dispatchEvent(event)) return;
-          }
-        }
-      }
+  let installed = true;
+  const guardedSet = function (this: Node, value: unknown) {
+    if (!installed) {
       nativeSet.call(this, value);
-    },
-  });
+      return;
+    }
+    const slice = isSliceString(value) ? value : undefined;
+    if (slice) value = slice.value;
+    if (state.active && state.experimentalSliceGuard && slice?.isSubstring && eventType === CHECK_TEXT) {
+      nextRequestId = nextRequestId >= 0x7fffffff ? 1 : nextRequestId + 1;
+      const requestId = nextRequestId;
+      if (this.isConnected) this.dispatchEvent(new CustomEvent(SLICE_BEFORE, { bubbles: true, detail: `${requestId}` }));
+      try {
+        nativeSet.call(this, value);
+      } finally {
+        document.dispatchEvent(new CustomEvent(SLICE_AFTER, { detail: `${requestId}` }));
+      }
+      return;
+    }
+    if (state.active) {
+      const comparable = typeof value === 'string' ? value
+        : value === null || (value === undefined && eventType === CHECK_TEXT) ? ''
+          : value === undefined || typeof value === 'number' || typeof value === 'boolean' || typeof value === 'bigint' ? `${value}`
+            : undefined;
+      if (comparable !== undefined) {
+        if (!this.isConnected && checkDetached(this, eventType, comparable)) return;
+        if (this.isConnected) {
+          const event = new CustomEvent(eventType, { bubbles: true, cancelable: true, detail: comparable });
+          if (!this.dispatchEvent(event)) return;
+        }
+      }
+    }
+    nativeSet.call(this, value);
+  };
+  Object.defineProperty(prototype, property, { ...descriptor, set: guardedSet });
+  return () => {
+    installed = false;
+    if (Object.getOwnPropertyDescriptor(prototype, property)?.set === guardedSet) {
+      Object.defineProperty(prototype, property, descriptor);
+    } else {
+      console.warn(`[LLM Page Translator] Cannot remove ${property} hook: accessor changed by the page`);
+    }
+  };
 }
 
 const key = Symbol.for('llm-page-translator:setter-guard');
 const state = { active: false, experimentalSliceGuard: false };
 if (!Reflect.has(window, key)) {
-  guardSetter(Node.prototype, 'textContent', CHECK_TEXT);
-  guardSetter(Element.prototype, 'innerHTML', CHECK_HTML);
+  let removeHooks: (() => void) | undefined;
   document.addEventListener(START, (event) => {
-    state.experimentalSliceGuard = event instanceof CustomEvent && event.detail === 'slice';
-    configureSlice(state.experimentalSliceGuard);
+    if (!removeHooks) {
+      const removeText = guardSetter(Node.prototype, 'textContent', CHECK_TEXT);
+      try {
+        const removeHtml = guardSetter(Element.prototype, 'innerHTML', CHECK_HTML);
+        removeHooks = () => {
+          removeHtml();
+          removeText();
+        };
+      } catch (error) {
+        removeText();
+        throw error;
+      }
+    }
+    const experimentalSliceGuard = event instanceof CustomEvent && event.detail === 'slice';
+    try {
+      configureSlice(experimentalSliceGuard);
+    } catch (error) {
+      removeHooks();
+      removeHooks = undefined;
+      throw error;
+    }
+    state.experimentalSliceGuard = experimentalSliceGuard;
     state.active = true;
     event.preventDefault();
   });
@@ -145,6 +175,8 @@ if (!Reflect.has(window, key)) {
     state.active = false;
     state.experimentalSliceGuard = false;
     configureSlice(false);
+    removeHooks?.();
+    removeHooks = undefined;
   });
   Object.defineProperty(window, key, { value: true });
 }

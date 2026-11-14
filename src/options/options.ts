@@ -52,7 +52,10 @@ function fill(s: GlobalSettings) {
   for (const k of NUMBER_KEYS) input(k).value = String(s[k]);
   input('translateDynamic').checked = s.translateDynamic;
   input('separateNumbers').checked = s.separateNumbers;
+  input('enableSetterHooks').checked = s.enableSetterHooks;
   input('experimentalSliceGuard').checked = s.experimentalSliceGuard;
+  input('experimentalCachedTextContent').checked = s.experimentalCachedTextContent;
+  updateHookOptions();
   input('autoTranslateSites').value = s.autoTranslateSites.join('\n');
   modelSelect.dataset.saved = s.model;
   fillModelSelect(modelSelect, [], { current: s.model });
@@ -72,7 +75,9 @@ function read(): GlobalSettings {
   for (const k of NUMBER_KEYS) s[k] = Number(input(k).value);
   s.translateDynamic = input('translateDynamic').checked;
   s.separateNumbers = input('separateNumbers').checked;
+  s.enableSetterHooks = input('enableSetterHooks').checked;
   s.experimentalSliceGuard = input('experimentalSliceGuard').checked;
+  s.experimentalCachedTextContent = input('experimentalCachedTextContent').checked;
   s.autoTranslateSites = input('autoTranslateSites')
     .value.split(/\s+/)
     .map((h) => h.trim().toLowerCase())
@@ -102,6 +107,12 @@ function updateHint() {
   urlHint.textContent = URL_HINTS[input('provider').value as Provider] ?? '';
 }
 
+function updateHookOptions() {
+  const disabled = !input('enableSetterHooks').checked;
+  input('experimentalSliceGuard').disabled = disabled;
+  input('experimentalCachedTextContent').disabled = disabled;
+}
+
 async function checkPermissions() {
   if (!isFirefox()) return;
   const ok = await browser.permissions.contains({ origins: ['<all_urls>'] });
@@ -124,6 +135,7 @@ input('provider').addEventListener('change', () => {
 });
 input('baseUrl').addEventListener('input', scheduleRefreshModels);
 input('apiKey').addEventListener('input', scheduleRefreshModels);
+input('enableSetterHooks').addEventListener('change', updateHookOptions);
 document.getElementById('refreshModels')!.addEventListener('click', refreshModels);
 
 document.getElementById('test')!.addEventListener('click', async () => {

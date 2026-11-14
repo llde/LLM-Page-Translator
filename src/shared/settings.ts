@@ -24,7 +24,9 @@ export const DEFAULT_SETTINGS: GlobalSettings = {
   autoTranslateSites: [],
   translateDynamic: true,
   separateNumbers: false,
+  enableSetterHooks: false,
   experimentalSliceGuard: false,
+  experimentalCachedTextContent: false,
   memoryRetentionDays: 30,
 };
 
@@ -92,6 +94,7 @@ export interface EffectiveSettings extends GlobalSettings {
 const isSet = <T>(v: T | undefined | null | ''): v is T => v !== undefined && v !== null && v !== '';
 
 export function effectiveConfig(g: GlobalSettings, t: TabSettings, url?: string): EffectiveSettings {
+  const enableSetterHooks = t.enableSetterHooks ?? g.enableSetterHooks;
   return {
     ...g,
     tabPrompt: resolveTabPrompt(t.tabPrompt, g.defaultTabPrompt, url, g.tabPromptRules),
@@ -101,6 +104,10 @@ export function effectiveConfig(g: GlobalSettings, t: TabSettings, url?: string)
     maxChunkSize: isSet(t.maxChunkSize) && t.maxChunkSize > 0 ? t.maxChunkSize : g.maxChunkSize,
     model: isSet(t.model) ? t.model : g.model,
     temperature: isSet(t.temperature) ? t.temperature : g.temperature,
+    separateNumbers: t.separateNumbers ?? g.separateNumbers,
+    enableSetterHooks,
+    experimentalSliceGuard: enableSetterHooks && (t.experimentalSliceGuard ?? g.experimentalSliceGuard),
+    experimentalCachedTextContent: enableSetterHooks && (t.experimentalCachedTextContent ?? g.experimentalCachedTextContent),
   };
 }
 

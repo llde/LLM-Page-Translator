@@ -128,7 +128,7 @@ export async function getTranslationMemory(
   if (!Array.isArray(values) || values.length !== segments.length || !values.every((value) => typeof value === 'string')) {
     return undefined;
   }
-  if (Array.isArray(entry)) {
+  if (Array.isArray(entry) && settings.experimentalCachedTextContent) {
     const scope = await scopeHash(context, settings);
     await withMemoryWrite(async () => {
       const current = (await browser.storage.local.get(key))[key];
@@ -154,11 +154,11 @@ export async function setTranslationMemory(
     return translation;
   });
   const key = await entryKey(context, settings, segments);
-  const scope = await scopeHash(context, settings);
+  const indexed = settings.experimentalCachedTextContent
+    ? { scope: await scopeHash(context, settings), texts: segments.map((segment) => segment.text), translations: values }
+    : values;
   await withMemoryWrite(async () => {
-    await browser.storage.local.set({
-      [key]: { scope, texts: segments.map((segment) => segment.text), translations: values },
-    });
+    await browser.storage.local.set({ [key]: indexed });
   });
 }
 

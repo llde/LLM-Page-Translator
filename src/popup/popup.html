@@ -62,9 +62,29 @@
     <label>Temperature
       <input id="temperature" type="number" min="0" max="2" step="any" />
     </label>
+    <label>Keep numbers unchanged and use them as chunk separators
+      <select id="separateNumbers">
+        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
+      </select>
+    </label>
+    <label>Enable innerHTML and textContent hooks
+      <select id="enableSetterHooks">
+        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
+      </select>
+    </label>
+    <label>Experimental: ignore textContent updates from string slices
+      <select id="experimentalSliceGuard">
+        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
+      </select>
+    </label>
+    <label>Experimental: apply cached textContent translations immediately
+      <select id="experimentalCachedTextContent">
+        <option value="">Global default</option><option value="true">Enabled</option><option value="false">Disabled</option>
+      </select>
+    </label>
     <button id="resetTab" type="button">Reset to global defaults</button>
   </details>
-  <p class="hint">Changes are saved automatically and apply to the next chunks sent from this tab.</p>
+  <p class="hint">Changes are saved automatically. Page behavior overrides apply the next time you start translation.</p>
 
   <script src="popup.js"></script>
 </body>

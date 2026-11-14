@@ -16,6 +16,10 @@ const fields = {
   model: $<HTMLSelectElement>('model'),
   temperature: $<HTMLInputElement>('temperature'),
   textDiagnostics: $<HTMLInputElement>('textDiagnostics'),
+  separateNumbers: $<HTMLSelectElement>('separateNumbers'),
+  enableSetterHooks: $<HTMLSelectElement>('enableSetterHooks'),
+  experimentalSliceGuard: $<HTMLSelectElement>('experimentalSliceGuard'),
+  experimentalCachedTextContent: $<HTMLSelectElement>('experimentalCachedTextContent'),
 };
 
 let tabId = -1;
@@ -70,6 +74,7 @@ async function refresh() {
 
 function readTabSettings(): TabSettings {
   const num = (v: string) => (v.trim() === '' ? undefined : Number(v));
+  const bool = (v: string) => v === 'true' ? true : v === 'false' ? false : undefined;
   return {
     sourceLanguage: fields.sourceLanguage.value || undefined,
     targetLanguage: fields.targetLanguage.value || undefined,
@@ -78,6 +83,10 @@ function readTabSettings(): TabSettings {
     model: fields.model.value.trim() || undefined,
     temperature: num(fields.temperature.value),
     textDiagnostics: fields.textDiagnostics.checked,
+    separateNumbers: bool(fields.separateNumbers.value),
+    enableSetterHooks: bool(fields.enableSetterHooks.value),
+    experimentalSliceGuard: bool(fields.experimentalSliceGuard.value),
+    experimentalCachedTextContent: bool(fields.experimentalCachedTextContent.value),
   };
 }
 
@@ -99,6 +108,17 @@ function fillTabSettings(t: TabSettings) {
   fillModel(t.model ?? '');
   fields.temperature.value = t.temperature?.toString() ?? '';
   fields.textDiagnostics.checked = t.textDiagnostics ?? false;
+  for (const key of ['separateNumbers', 'enableSetterHooks', 'experimentalSliceGuard', 'experimentalCachedTextContent'] as const) {
+    fields[key].options[0].textContent = `Global default (${global[key] ? 'enabled' : 'disabled'})`;
+    fields[key].value = t[key] === undefined ? '' : String(t[key]);
+  }
+  updateHookOptions();
+}
+
+function updateHookOptions() {
+  const enabled = fields.enableSetterHooks.value === '' ? global.enableSetterHooks : fields.enableSetterHooks.value === 'true';
+  fields.experimentalSliceGuard.disabled = !enabled;
+  fields.experimentalCachedTextContent.disabled = !enabled;
 }
 
 function effectivePrompt(t: TabSettings): string {
@@ -178,6 +198,7 @@ async function init() {
   });
 
   Object.values(fields).forEach((f) => f.addEventListener('input', scheduleSave));
+  fields.enableSetterHooks.addEventListener('change', updateHookOptions);
   fields.textDiagnostics.addEventListener('change', async () => {
     clearTimeout(saveTimer);
     try {

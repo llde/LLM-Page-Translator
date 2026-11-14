@@ -18,7 +18,9 @@ export interface GlobalSettings {
   autoTranslateSites: string[];
   translateDynamic: boolean;
   separateNumbers: boolean;
+  enableSetterHooks: boolean;
   experimentalSliceGuard: boolean;
+  experimentalCachedTextContent: boolean;
   memoryRetentionDays: number;
 }
 
@@ -31,6 +33,10 @@ export interface TabPromptRule {
 export interface TabSettings {
   tabPrompt?: string;
   textDiagnostics?: boolean;
+  separateNumbers?: boolean;
+  enableSetterHooks?: boolean;
+  experimentalSliceGuard?: boolean;
+  experimentalCachedTextContent?: boolean;
   /** Empty/undefined = auto-detect. */
   sourceLanguage?: string;
   targetLanguage?: string;
@@ -59,8 +65,8 @@ export interface ChatMessage {
 
 /** Content script -> background (over the "xt" port). */
 export type PortIn =
-  | { type: 'checkMemory'; chunkId: number; segments: SegmentPayload[] }
-  | { type: 'translate'; chunkId: number; segments: SegmentPayload[] }
+  | { type: 'checkMemory'; chunkId: number; segments: SegmentPayload[]; experimentalCachedTextContent: boolean }
+  | { type: 'translate'; chunkId: number; segments: SegmentPayload[]; experimentalCachedTextContent: boolean }
   | { type: 'cancel'; chunkId: number }
   | { type: 'ping' };
 
@@ -76,7 +82,10 @@ export interface ContentConfig {
   concurrency: number;
   translateDynamic: boolean;
   separateNumbers: boolean;
+  enableSetterHooks: boolean;
   experimentalSliceGuard: boolean;
+  experimentalCachedTextContent: boolean;
+  experimentalCachedTextContentOverride?: boolean;
   autoTranslate: boolean;
   textDiagnostics: boolean;
 }
